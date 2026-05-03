@@ -1341,3 +1341,1623 @@ and I’ll:
 * implement **real storage engine code**
 * explain like you're building your own PostgreSQL from scratch
 * give **full working classes, not theory**
+
+# phase 1 deep dive
+
+Alright—now we stop hand-waving and actually **build the core of your database**.
+Phase 1 is where most hobby DBs fail because people underestimate it. If this layer is weak, everything above (SQL, transactions, etc.) collapses.
+
+We’re building a **real storage engine skeleton**—inspired by systems like PostgreSQL and MySQL, but simplified.
+
+---
+
+# 🧠 PHASE 1: STORAGE ENGINE (Deep Dive)
+
+## 🎯 Goal
+
+Persist data safely and efficiently using:
+
+```text
+Disk ↔ Page ↔ Buffer Pool ↔ Higher Layers
+```
+
+---
+
+# 🧱 1. Core Concepts (No skipping)
+
+### 🔹 Page (Atomic unit of storage)
+
+* Fixed size (e.g., 4KB / 8KB)
+* Everything stored inside pages
+* Never read/write partial data
+
+---
+
+### 🔹 Disk Manager
+
+* Talks to actual file system
+* Reads/writes pages
+
+---
+
+### 🔹 Buffer Pool
+
+* In-memory cache of pages
+* Avoids disk I/O
+* Handles eviction (LRU later)
+
+---
+
+### 🔹 Page ID
+
+* Integer identifier
+* Maps to file offset
+
+---
+
+# 🏗️ 2. Module: `minidb-storage`
+
+## Package structure
+
+```text
+com.minidb.storage
+ ├── disk
+ ├── page
+ ├── buffer
+ └── engine
+```
+
+---
+
+# 📄 3. PAGE IMPLEMENTATION
+
+## 🔹 `Page.java`
+
+```java
+package com.minidb.storage.page;
+
+public class Page {
+
+    public static final int PAGE_SIZE = 4096;
+
+    private final int pageId;
+    private final byte[] data;
+    private boolean dirty;
+
+    public Page(int pageId) {
+        this.pageId = pageId;
+        this.data = new byte[PAGE_SIZE];
+        this.dirty = false;
+    }
+
+    public int getPageId() {
+        return pageId;
+    }
+
+    public byte[] getData() {
+        return data;
+    }
+
+    public void markDirty() {
+        this.dirty = true;
+    }
+
+    public boolean isDirty() {
+        return dirty;
+    }
+}
+```
+
+---
+
+# 💾 4. DISK MANAGER (REAL FILE I/O)
+
+## 🔹 `DiskManager.java`
+
+```java
+package com.minidb.storage.disk;
+
+import java.io.IOException;
+
+public interface DiskManager {
+    void writePage(int pageId, byte[] data) throws IOException;
+    byte[] readPage(int pageId) throws IOException;
+}
+```
+
+---
+
+## 🔹 `FileDiskManager.java`
+
+```java
+package com.minidb.storage.disk;
+
+import java.io.RandomAccessFile;
+import java.io.IOException;
+
+public class FileDiskManager implements DiskManager {
+
+    private final RandomAccessFile file;
+    private static final int PAGE_SIZE = 4096;
+
+    public FileDiskManager(String filePath) throws IOException {
+        this.file = new RandomAccessFile(filePath, "rw");
+    }
+
+    @Override
+    public synchronized void writePage(int pageId, byte[] data) throws IOException {
+        file.seek((long) pageId * PAGE_SIZE);
+        file.write(data);
+    }
+
+    @Override
+    public synchronized byte[] readPage(int pageId) throws IOException {
+        byte[] data = new byte[PAGE_SIZE];
+        file.seek((long) pageId * PAGE_SIZE);
+        file.read(data);
+        return data;
+    }
+}
+```
+
+---
+
+# 🧠 5. BUFFER POOL (CORE ENGINE)
+
+## 🔹 Why this matters
+
+Without buffer pool:
+
+* Every read = disk hit ❌ (slow)
+* No caching ❌
+
+---
+
+## 🔹 `BufferPoolManager.java`
+
+```java
+package com.minidb.storage.buffer;
+
+import com.minidb.storage.disk.DiskManager;
+import com.minidb.storage.page.Page;
+
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+
+public class BufferPoolManager {
+
+    private final DiskManager diskManager;
+    private final int poolSize;
+
+    private final Map<Integer, Page> pageTable;
+
+    public BufferPoolManager(DiskManager diskManager, int poolSize) {
+        this.diskManager = diskManager;
+        this.poolSize = poolSize;
+        this.pageTable = new HashMap<>();
+    }
+
+    public Page fetchPage(int pageId) throws IOException {
+
+        // 1. Check cache
+        if (pageTable.containsKey(pageId)) {
+            return pageTable.get(pageId);
+        }
+
+        // 2. If full → evict (simple strategy)
+        if (pageTable.size() >= poolSize) {
+            evictPage();
+        }
+
+        // 3. Load from disk
+        byte[] data = diskManager.readPage(pageId);
+        Page page = new Page(pageId);
+        System.arraycopy(data, 0, page.getData(), 0, data.length);
+
+        pageTable.put(pageId, page);
+        return page;
+    }
+
+    public void flushPage(int pageId) throws IOException {
+        Page page = pageTable.get(pageId);
+        if (page != null && page.isDirty()) {
+            diskManager.writePage(pageId, page.getData());
+            page.markDirty(); // reset logic later
+        }
+    }
+
+    private void evictPage() throws IOException {
+        Integer victim = pageTable.keySet().iterator().next();
+        flushPage(victim);
+        pageTable.remove(victim);
+    }
+}
+```
+
+---
+
+# ⚙️ 6. STORAGE ENGINE ENTRY POINT
+
+## 🔹 `StorageEngine.java`
+
+```java
+package com.minidb.storage.engine;
+
+import com.minidb.storage.buffer.BufferPoolManager;
+import com.minidb.storage.disk.FileDiskManager;
+
+public class StorageEngine {
+
+    private final BufferPoolManager bufferPool;
+
+    public StorageEngine(String dbFilePath) throws Exception {
+        FileDiskManager diskManager = new FileDiskManager(dbFilePath);
+        this.bufferPool = new BufferPoolManager(diskManager, 10);
+    }
+
+    public BufferPoolManager getBufferPool() {
+        return bufferPool;
+    }
+}
+```
+
+---
+
+# 🧪 7. TEST (MANDATORY)
+
+## 🔹 `StorageTest.java`
+
+```java
+package com.minidb.storage;
+
+import com.minidb.storage.engine.StorageEngine;
+import com.minidb.storage.page.Page;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+public class StorageTest {
+
+    @Test
+    void testReadWritePage() throws Exception {
+        StorageEngine engine = new StorageEngine("test.db");
+
+        Page page = engine.getBufferPool().fetchPage(1);
+        page.getData()[0] = 42;
+        page.markDirty();
+
+        engine.getBufferPool().flushPage(1);
+
+        Page loaded = engine.getBufferPool().fetchPage(1);
+        assertEquals(42, loaded.getData()[0]);
+    }
+}
+```
+
+---
+
+# ⚠️ 8. CURRENT LIMITATIONS (INTENTIONAL)
+
+Right now:
+
+* ❌ No LRU eviction
+* ❌ No concurrency control
+* ❌ No WAL (write-ahead logging)
+* ❌ No page structure (just raw bytes)
+
+👉 This is **correct for Phase 1**
+
+---
+
+# 🔥 9. What You Just Built
+
+You now have:
+
+✔ Disk persistence
+✔ Page abstraction
+✔ Buffer pool caching
+✔ Basic eviction
+✔ Real file-backed storage
+
+👉 This is already **more than most tutorials ever reach**
+
+---
+
+# 🚀 10. Phase 2 Preview
+
+Next we build:
+
+### 👉 Catalog + Table Storage
+
+* Table abstraction
+* Row format
+* Insert/select basic data
+* Schema management
+
+---
+
+## 👉 Say next:
+
+**"Phase 2 deep dive"**
+
+And we’ll:
+
+* design table layout inside pages
+* implement row serialization
+* actually store real data (not just bytes)
+
+This is where your DB becomes **usable**, not just infrastructure.
+
+# Phase 2 Catalog + Table Storage (Deep Dive)
+
+Now it gets interesting—Phase 2 is where your system stops being “just infrastructure” and actually starts behaving like a database.
+
+In Phase 1 you built **how bytes move**.
+In Phase 2 you define **what those bytes mean**.
+
+---
+
+# 🧠 PHASE 2: CATALOG + TABLE STORAGE
+
+## 🎯 Goal
+
+Turn raw pages into **structured data**:
+
+```text
+Row → Serialized Bytes → Page → Disk
+         ↑
+     Schema (Catalog)
+```
+
+---
+
+# 🧱 1. What We Are Building
+
+You already have:
+
+* DiskManager ✅
+* BufferPool ✅
+* Page abstraction ✅
+
+Now we add:
+
+### 🔹 Catalog (metadata)
+
+* What tables exist?
+* What columns they have?
+
+### 🔹 Table Storage
+
+* How rows are stored inside pages
+
+### 🔹 Row Serialization
+
+* Convert Java objects ↔ byte[]
+
+---
+
+# 🏗️ 2. Module Responsibility
+
+## `minidb-catalog`
+
+Handles:
+
+* Database
+* Schema
+* Table
+* Column
+
+## `minidb-storage`
+
+Handles:
+
+* Page layout
+* Row storage
+
+---
+
+# 📄 3. DATA MODEL (Catalog)
+
+## 🔹 Column
+
+```java
+package com.minidb.catalog.model;
+
+public class Column {
+    private final String name;
+    private final DataType type;
+
+    public Column(String name, DataType type) {
+        this.name = name;
+        this.type = type;
+    }
+
+    public String getName() { return name; }
+    public DataType getType() { return type; }
+}
+```
+
+---
+
+## 🔹 DataType
+
+```java
+package com.minidb.catalog.model;
+
+public enum DataType {
+    INT(4),
+    STRING(255); // fixed for now
+
+    private final int size;
+
+    DataType(int size) {
+        this.size = size;
+    }
+
+    public int getSize() {
+        return size;
+    }
+}
+```
+
+---
+
+## 🔹 Table
+
+```java
+package com.minidb.catalog.model;
+
+import java.util.List;
+
+public class Table {
+
+    private final String name;
+    private final List<Column> columns;
+
+    public Table(String name, List<Column> columns) {
+        this.name = name;
+        this.columns = columns;
+    }
+
+    public List<Column> getColumns() {
+        return columns;
+    }
+
+    public int getRowSize() {
+        return columns.stream()
+                .mapToInt(c -> c.getType().getSize())
+                .sum();
+    }
+}
+```
+
+---
+
+# 🧠 4. ROW REPRESENTATION
+
+## 🔹 Row.java
+
+```java
+package com.minidb.storage.row;
+
+import java.util.List;
+
+public class Row {
+    private final List<Object> values;
+
+    public Row(List<Object> values) {
+        this.values = values;
+    }
+
+    public List<Object> getValues() {
+        return values;
+    }
+}
+```
+
+---
+
+# 🔄 5. ROW SERIALIZATION (CRITICAL)
+
+This is where most people mess up.
+
+## 🔹 RowSerializer.java
+
+```java
+package com.minidb.storage.row;
+
+import com.minidb.catalog.model.Column;
+import com.minidb.catalog.model.DataType;
+import com.minidb.catalog.model.Table;
+
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+
+public class RowSerializer {
+
+    public static byte[] serialize(Row row, Table table) {
+        ByteBuffer buffer = ByteBuffer.allocate(table.getRowSize());
+
+        for (int i = 0; i < table.getColumns().size(); i++) {
+            Column col = table.getColumns().get(i);
+            Object val = row.getValues().get(i);
+
+            if (col.getType() == DataType.INT) {
+                buffer.putInt((Integer) val);
+            } else if (col.getType() == DataType.STRING) {
+                byte[] bytes = ((String) val).getBytes(StandardCharsets.UTF_8);
+                byte[] fixed = new byte[col.getType().getSize()];
+                System.arraycopy(bytes, 0, fixed, 0, Math.min(bytes.length, fixed.length));
+                buffer.put(fixed);
+            }
+        }
+
+        return buffer.array();
+    }
+
+    public static Row deserialize(byte[] data, Table table) {
+        ByteBuffer buffer = ByteBuffer.wrap(data);
+
+        java.util.List<Object> values = new java.util.ArrayList<>();
+
+        for (Column col : table.getColumns()) {
+            if (col.getType() == DataType.INT) {
+                values.add(buffer.getInt());
+            } else if (col.getType() == DataType.STRING) {
+                byte[] bytes = new byte[col.getType().getSize()];
+                buffer.get(bytes);
+                values.add(new String(bytes).trim());
+            }
+        }
+
+        return new Row(values);
+    }
+}
+```
+
+---
+
+# 📦 6. PAGE LAYOUT (VERY IMPORTANT)
+
+We now define how rows live inside a page.
+
+## Simple Layout (Phase 2)
+
+```text
+[HEADER][ROW1][ROW2][ROW3]...
+```
+
+Header:
+
+* number of rows (int)
+
+---
+
+## 🔹 TablePage.java
+
+```java
+package com.minidb.storage.page;
+
+import com.minidb.catalog.model.Table;
+import com.minidb.storage.row.Row;
+import com.minidb.storage.row.RowSerializer;
+
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
+
+public class TablePage {
+
+    private final Page page;
+    private final Table table;
+
+    public TablePage(Page page, Table table) {
+        this.page = page;
+        this.table = table;
+    }
+
+    public void insertRow(Row row) {
+        ByteBuffer buffer = ByteBuffer.wrap(page.getData());
+
+        int rowCount = buffer.getInt(0);
+        int offset = 4 + rowCount * table.getRowSize();
+
+        byte[] serialized = RowSerializer.serialize(row, table);
+
+        System.arraycopy(serialized, 0, page.getData(), offset, serialized.length);
+
+        buffer.putInt(0, rowCount + 1);
+        page.markDirty();
+    }
+
+    public List<Row> getRows() {
+        ByteBuffer buffer = ByteBuffer.wrap(page.getData());
+
+        int rowCount = buffer.getInt(0);
+        List<Row> rows = new ArrayList<>();
+
+        int offset = 4;
+
+        for (int i = 0; i < rowCount; i++) {
+            byte[] rowBytes = new byte[table.getRowSize()];
+            System.arraycopy(page.getData(), offset, rowBytes, 0, rowBytes.length);
+
+            rows.add(RowSerializer.deserialize(rowBytes, table));
+            offset += rowBytes.length;
+        }
+
+        return rows;
+    }
+}
+```
+
+---
+
+# 🧠 7. TABLE STORAGE ENGINE
+
+## 🔹 TableStorage.java
+
+```java
+package com.minidb.storage.engine;
+
+import com.minidb.catalog.model.Table;
+import com.minidb.storage.buffer.BufferPoolManager;
+import com.minidb.storage.page.Page;
+import com.minidb.storage.page.TablePage;
+import com.minidb.storage.row.Row;
+
+public class TableStorage {
+
+    private final BufferPoolManager bufferPool;
+    private final Table table;
+
+    public TableStorage(BufferPoolManager bufferPool, Table table) {
+        this.bufferPool = bufferPool;
+        this.table = table;
+    }
+
+    public void insert(Row row) throws Exception {
+        Page page = bufferPool.fetchPage(0); // single page for now
+        TablePage tablePage = new TablePage(page, table);
+
+        tablePage.insertRow(row);
+        bufferPool.flushPage(0);
+    }
+
+    public java.util.List<Row> scan() throws Exception {
+        Page page = bufferPool.fetchPage(0);
+        TablePage tablePage = new TablePage(page, table);
+
+        return tablePage.getRows();
+    }
+}
+```
+
+---
+
+# 🧪 8. TEST (NOW REAL DATA)
+
+```java
+@Test
+void testInsertAndRead() throws Exception {
+
+    Table table = new Table("users", List.of(
+            new Column("id", DataType.INT),
+            new Column("name", DataType.STRING)
+    ));
+
+    StorageEngine engine = new StorageEngine("test.db");
+
+    TableStorage storage = new TableStorage(
+            engine.getBufferPool(), table
+    );
+
+    storage.insert(new Row(List.of(1, "Alice")));
+    storage.insert(new Row(List.of(2, "Bob")));
+
+    var rows = storage.scan();
+
+    assertEquals(2, rows.size());
+}
+```
+
+---
+
+# ⚠️ 9. LIMITATIONS (IMPORTANT)
+
+Right now:
+
+* ❌ Only 1 page per table
+* ❌ No free space tracking
+* ❌ No delete/update
+* ❌ Fixed-length strings
+* ❌ No indexing
+
+👉 This is intentional.
+
+---
+
+# 🔥 10. What You Just Built
+
+You now have:
+
+✔ Schema definition
+✔ Row abstraction
+✔ Serialization/deserialization
+✔ Page-level storage
+✔ Insert + Scan
+
+👉 This is basically a **mini heap file implementation**
+
+---
+
+# 🚀 11. Phase 3 Preview
+
+Now we move to:
+
+### 👉 SQL Parsing (ANTLR)
+
+* Convert SQL → AST
+* Example:
+
+  ```sql
+  SELECT * FROM users;
+  ```
+
+  → AST → Logical Plan
+
+---
+
+## 👉 Next Step
+
+Say:
+
+**"Phase 3 deep dive"**
+
+And we’ll:
+
+* wire your existing ANTLR grammar
+* build AST properly
+* connect SQL → your storage engine
+
+This is where your DB becomes **queryable**, not just programmable.
+
+# Phase 3 SQL → AST → Logical Plan
+
+Good—this is the phase where your project stops being a “toy executor” and starts becoming a **real database engine**.
+
+Right now, you have:
+
+```text
+SQL → AST → Engine (direct execution)
+```
+
+That’s *too direct*. Real systems introduce a **planning layer**.
+
+---
+
+# 🚀 PHASE 3 — SQL → AST → Logical Plan
+
+We’ll build this pipeline:
+
+```text
+SQL
+ ↓
+ANTLR Parse Tree
+ ↓
+AST (you already have)
+ ↓
+Logical Plan  ✅ (NEW)
+ ↓
+(Phase 4 → Physical Plan)
+```
+
+---
+
+# 🧠 WHY THIS PHASE MATTERS
+
+Right now your Engine is doing:
+
+* parsing logic ❌
+* execution logic ❌
+* filtering ❌
+* projection ❌
+
+All mixed.
+
+👉 That kills:
+
+* extensibility
+* optimization
+* join support later
+
+---
+
+# 🎯 TARGET
+
+Convert:
+
+```sql
+SELECT id, name FROM db.schema.users WHERE id = 10
+```
+
+Into:
+
+```text
+Projection(id, name)
+    ↓
+Filter(id = 10)
+    ↓
+Scan(users)
+```
+
+---
+
+# 🧱 STEP 1 — Define Logical Plan Nodes
+
+Create new module/package:
+
+```text
+minidb-executor
+  └── planner
+        └── logical
+```
+
+---
+
+## 🔹 Base Interface
+
+```java
+package com.minidb.executor.planner.logical;
+
+public interface LogicalPlan {
+}
+```
+
+---
+
+## 🔹 Table Scan
+
+```java
+package com.minidb.executor.planner.logical;
+
+import com.minidb.catalog.model.Table;
+
+public class ScanNode implements LogicalPlan {
+
+    private final Table table;
+
+    public ScanNode(Table table) {
+        this.table = table;
+    }
+
+    public Table getTable() {
+        return table;
+    }
+}
+```
+
+---
+
+## 🔹 Filter Node
+
+```java
+package com.minidb.executor.planner.logical;
+
+import com.minidb.sql.ast.Expression;
+
+public class FilterNode implements LogicalPlan {
+
+    private final LogicalPlan input;
+    private final Expression predicate;
+
+    public FilterNode(LogicalPlan input, Expression predicate) {
+        this.input = input;
+        this.predicate = predicate;
+    }
+
+    public LogicalPlan getInput() {
+        return input;
+    }
+
+    public Expression getPredicate() {
+        return predicate;
+    }
+}
+```
+
+---
+
+## 🔹 Projection Node
+
+```java
+package com.minidb.executor.planner.logical;
+
+import com.minidb.sql.ast.SelectItem;
+
+import java.util.List;
+
+public class ProjectionNode implements LogicalPlan {
+
+    private final LogicalPlan input;
+    private final List<SelectItem> items;
+
+    public ProjectionNode(LogicalPlan input, List<SelectItem> items) {
+        this.input = input;
+        this.items = items;
+    }
+
+    public LogicalPlan getInput() {
+        return input;
+    }
+
+    public List<SelectItem> getItems() {
+        return items;
+    }
+}
+```
+
+---
+
+# 🧱 STEP 2 — Build Logical Planner
+
+Create:
+
+```java
+package com.minidb.executor.planner;
+
+import com.minidb.catalog.CatalogManager;
+import com.minidb.catalog.model.Table;
+import com.minidb.executor.planner.logical.*;
+import com.minidb.sql.ast.*;
+
+public class LogicalPlanner {
+
+    private final CatalogManager catalog;
+
+    public LogicalPlanner(CatalogManager catalog) {
+        this.catalog = catalog;
+    }
+
+    public LogicalPlan plan(Statement stmt) {
+
+        if (stmt instanceof SelectStatement select) {
+            return planSelect(select);
+        }
+
+        throw new UnsupportedOperationException("Only SELECT supported in planner");
+    }
+
+    private LogicalPlan planSelect(SelectStatement stmt) {
+
+        Table table = resolveTable(stmt.getTable());
+
+        // Step 1: Scan
+        LogicalPlan plan = new ScanNode(table);
+
+        // Step 2: Filter
+        if (stmt.getWhere() != null) {
+            plan = new FilterNode(plan, stmt.getWhere());
+        }
+
+        // Step 3: Projection
+        plan = new ProjectionNode(plan, stmt.getItems());
+
+        return plan;
+    }
+
+    private Table resolveTable(String qualifiedName) {
+
+        String[] parts = qualifiedName.split("\\.");
+
+        return catalog
+                .getDatabase(parts[0])
+                .getSchema(parts[1])
+                .getTable(parts[2]);
+    }
+}
+```
+
+---
+
+# 🧱 STEP 3 — Update Engine to Use Planner
+
+Right now your Engine is directly executing AST.
+
+👉 Replace SELECT path.
+
+---
+
+## 🔥 Updated SELECT Flow
+
+```java
+private String select(SelectStatement stmt) {
+
+    LogicalPlanner planner = new LogicalPlanner(catalog);
+    LogicalPlan plan = planner.plan(stmt);
+
+    return executePlan(plan);
+}
+```
+
+---
+
+# 🧱 STEP 4 — Plan Executor (Temporary Interpreter)
+
+We now interpret the plan (Phase 4 will optimize this).
+
+---
+
+## 🔥 Plan Execution
+
+```java
+private String executePlan(LogicalPlan plan) {
+
+    List<Map<String, Object>> rows = executeNode(plan);
+
+    StringBuilder sb = new StringBuilder();
+
+    for (Map<String, Object> row : rows) {
+        sb.append(row.values()).append("\n");
+    }
+
+    return sb.toString();
+}
+```
+
+---
+
+## 🔥 Recursive Node Execution
+
+```java
+private List<Map<String, Object>> executeNode(LogicalPlan node) {
+
+    if (node instanceof ScanNode scan) {
+        return executeScan(scan);
+    }
+
+    if (node instanceof FilterNode filter) {
+        return executeFilter(filter);
+    }
+
+    if (node instanceof ProjectionNode proj) {
+        return executeProjection(proj);
+    }
+
+    throw new RuntimeException("Unknown node");
+}
+```
+
+---
+
+## 🔹 Scan Execution
+
+```java
+private List<Map<String, Object>> executeScan(ScanNode node) {
+
+    TableStorage storage = new TableStorage(
+            storageEngine.getBufferPool(),
+            node.getTable()
+    );
+
+    List<Row> rows = storage.scan();
+
+    List<Map<String, Object>> result = new ArrayList<>();
+
+    for (Row r : rows) {
+
+        Map<String, Object> map = new HashMap<>();
+
+        for (int i = 0; i < node.getTable().getColumns().size(); i++) {
+            map.put(
+                node.getTable().getColumns().get(i).getName(),
+                r.getValues().get(i)
+            );
+        }
+
+        result.add(map);
+    }
+
+    return result;
+}
+```
+
+---
+
+## 🔹 Filter Execution
+
+```java
+private List<Map<String, Object>> executeFilter(FilterNode node) {
+
+    List<Map<String, Object>> input = executeNode(node.getInput());
+
+    List<Map<String, Object>> result = new ArrayList<>();
+
+    for (Map<String, Object> row : input) {
+
+        RowContext ctx = new RowContext(row);
+
+        Object val = node.getPredicate().evaluate(ctx);
+
+        if (val instanceof Boolean && (Boolean) val) {
+            result.add(row);
+        }
+    }
+
+    return result;
+}
+```
+
+---
+
+## 🔹 Projection Execution
+
+```java
+private List<Map<String, Object>> executeProjection(ProjectionNode node) {
+
+    List<Map<String, Object>> input = executeNode(node.getInput());
+
+    List<Map<String, Object>> result = new ArrayList<>();
+
+    for (Map<String, Object> row : input) {
+
+        RowContext ctx = new RowContext(row);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+
+        for (SelectItem item : node.getItems()) {
+
+            if (item.getExpression() instanceof ColumnExpression col &&
+                    col.getColumn().equals("*")) {
+
+                out.putAll(row);
+
+            } else {
+                Object val = item.getExpression().evaluate(ctx);
+                out.put(item.toString(), val);
+            }
+        }
+
+        result.add(out);
+    }
+
+    return result;
+}
+```
+
+---
+
+# 🧠 WHAT YOU JUST BUILT
+
+You now have:
+
+```text
+AST → Logical Plan → Executor
+```
+
+This is **exactly how real databases start**.
+
+---
+
+# 🔥 BIG WIN
+
+You can now:
+
+* add JOIN node easily ✅
+* add ORDER BY node ✅
+* push filters down (optimization) ✅
+* swap execution engine later ✅
+
+---
+
+# ⚠️ CURRENT LIMITATION
+
+This is still:
+
+```text
+Row-by-row interpreter
+```
+
+👉 Not efficient.
+
+---
+
+# 🚀 NEXT PHASE (VERY IMPORTANT)
+
+Say:
+
+**"Phase 4 deep dive"**
+
+We’ll convert this into:
+
+```text
+Logical Plan → Physical Plan → Operator Pipeline
+```
+
+That’s where:
+
+* iterators (next())
+* pipelining
+* performance gains
+
+come in—and your DB becomes **real**.
+
+# Phase 3 — Query Planner (The Brain)
+
+Alright — now things get serious. Up to now your DB is basically:
+
+> Parser → Executor (direct execution)
+
+That works… but it’s **not how real databases operate**.
+
+---
+
+# 🚀 Phase 3 — Query Planner (The Brain)
+
+Right now your `Engine` is doing:
+
+```text
+Statement → execute directly
+```
+
+We’re going to change it to:
+
+```text
+Statement
+   ↓
+Logical Plan
+   ↓
+Physical Plan (optional for now)
+   ↓
+Executor (operators)
+```
+
+---
+
+# 🧠 Why This Matters
+
+Without a planner:
+
+* ❌ No optimization
+* ❌ No indexes later
+* ❌ No joins scaling
+* ❌ No execution strategies
+
+With planner:
+
+* ✅ Filter pushdown
+* ✅ Projection pruning
+* ✅ Index usage (later)
+* ✅ Join strategies
+
+---
+
+# 🏗️ Step 1 — Create Plan Layer
+
+👉 New package:
+
+```text
+com.minidb.planner
+```
+
+---
+
+## ✅ Interface: `PlanNode`
+
+```java
+package com.minidb.planner;
+
+import com.minidb.storage.row.Row;
+import java.util.List;
+
+public interface PlanNode {
+    List<Row> execute() throws Exception;
+}
+```
+
+---
+
+# 🏗️ Step 2 — Core Operators
+
+These are your **execution building blocks**.
+
+---
+
+## 🔹 1. TableScanNode
+
+```java
+package com.minidb.planner;
+
+import com.minidb.catalog.model.Table;
+import com.minidb.storage.engine.TableStorage;
+import com.minidb.storage.row.Row;
+
+import java.util.List;
+
+public class TableScanNode implements PlanNode {
+
+    private final TableStorage storage;
+
+    public TableScanNode(TableStorage storage) {
+        this.storage = storage;
+    }
+
+    @Override
+    public List<Row> execute() throws Exception {
+        return storage.scan();
+    }
+}
+```
+
+---
+
+## 🔹 2. FilterNode (WHERE)
+
+```java
+package com.minidb.planner;
+
+import com.minidb.sql.ast.Expression;
+import com.minidb.sql.ast.RowContext;
+import com.minidb.storage.row.Row;
+import com.minidb.catalog.model.Table;
+
+import java.util.*;
+
+public class FilterNode implements PlanNode {
+
+    private final PlanNode child;
+    private final Expression condition;
+    private final Table table;
+
+    public FilterNode(PlanNode child, Expression condition, Table table) {
+        this.child = child;
+        this.condition = condition;
+        this.table = table;
+    }
+
+    @Override
+    public List<Row> execute() throws Exception {
+
+        List<Row> input = child.execute();
+        List<Row> output = new ArrayList<>();
+
+        for (Row r : input) {
+
+            Map<String, Object> map = new HashMap<>();
+
+            for (int i = 0; i < table.getColumns().size(); i++) {
+                map.put(table.getColumns().get(i).getName(), r.getValues().get(i));
+            }
+
+            RowContext ctx = new RowContext(map);
+
+            Object result = condition.evaluate(ctx);
+
+            if (result instanceof Boolean && (Boolean) result) {
+                output.add(r);
+            }
+        }
+
+        return output;
+    }
+}
+```
+
+---
+
+## 🔹 3. ProjectNode (SELECT columns)
+
+```java
+package com.minidb.planner;
+
+import com.minidb.sql.ast.*;
+import com.minidb.catalog.model.Table;
+import com.minidb.storage.row.Row;
+
+import java.util.*;
+
+public class ProjectNode implements PlanNode {
+
+    private final PlanNode child;
+    private final List<SelectItem> items;
+    private final Table table;
+
+    public ProjectNode(PlanNode child, List<SelectItem> items, Table table) {
+        this.child = child;
+        this.items = items;
+        this.table = table;
+    }
+
+    @Override
+    public List<Row> execute() throws Exception {
+
+        List<Row> input = child.execute();
+        List<Row> output = new ArrayList<>();
+
+        for (Row r : input) {
+
+            Map<String, Object> map = new HashMap<>();
+
+            for (int i = 0; i < table.getColumns().size(); i++) {
+                map.put(table.getColumns().get(i).getName(), r.getValues().get(i));
+            }
+
+            RowContext ctx = new RowContext(map);
+
+            List<Object> values = new ArrayList<>();
+
+            for (SelectItem item : items) {
+
+                if (item.getExpression() instanceof ColumnExpression col &&
+                        col.getColumn().equals("*")) {
+
+                    values.addAll(r.getValues());
+
+                } else {
+                    values.add(item.getExpression().evaluate(ctx));
+                }
+            }
+
+            output.add(new Row(values));
+        }
+
+        return output;
+    }
+}
+```
+
+---
+
+# 🏗️ Step 3 — QueryPlanner
+
+This converts **AST → Plan Tree**
+
+```java
+package com.minidb.planner;
+
+import com.minidb.catalog.CatalogManager;
+import com.minidb.catalog.model.Table;
+import com.minidb.sql.ast.*;
+import com.minidb.storage.engine.StorageEngine;
+import com.minidb.storage.engine.TableStorage;
+
+public class QueryPlanner {
+
+    private final CatalogManager catalog;
+    private final StorageEngine storageEngine;
+
+    public QueryPlanner(CatalogManager catalog, StorageEngine storageEngine) {
+        this.catalog = catalog;
+        this.storageEngine = storageEngine;
+    }
+
+    public PlanNode plan(SelectStatement stmt) {
+
+        Table table = resolveTable(stmt.getTable());
+
+        TableStorage storage = new TableStorage(
+                storageEngine.getBufferPool(),
+                table
+        );
+
+        // Step 1: Scan
+        PlanNode root = new TableScanNode(storage);
+
+        // Step 2: Filter
+        if (stmt.getWhere() != null) {
+            root = new FilterNode(root, stmt.getWhere(), table);
+        }
+
+        // Step 3: Project
+        root = new ProjectNode(root, stmt.getItems(), table);
+
+        return root;
+    }
+
+    private Table resolveTable(String qualifiedName) {
+
+        String[] parts = qualifiedName.split("\\.");
+
+        return catalog
+                .getDatabase(parts[0])
+                .getSchema(parts[1])
+                .getTable(parts[2]);
+    }
+}
+```
+
+---
+
+# 🏗️ Step 4 — Update Engine (CRITICAL CHANGE)
+
+Now your `Engine.select()` becomes:
+
+```java
+private final QueryPlanner planner;
+
+public Engine(Path dataDir, CatalogManager catalog) throws Exception {
+    this.catalog = catalog;
+
+    this.storageEngine = new StorageEngine(
+            dataDir.resolve("minidb.data").toString()
+    );
+
+    this.planner = new QueryPlanner(catalog, storageEngine);
+}
+```
+
+---
+
+## 🔥 Replace SELECT method
+
+```java
+private String select(SelectStatement stmt) throws Exception {
+
+    PlanNode plan = planner.plan(stmt);
+
+    List<Row> rows = plan.execute();
+
+    StringBuilder result = new StringBuilder();
+
+    for (Row r : rows) {
+        result.append(r.getValues()).append("\n");
+    }
+
+    return result.toString();
+}
+```
+
+---
+
+# 🧠 What You Just Built
+
+This is **huge**:
+
+```text
+SELECT name FROM users WHERE age > 20
+```
+
+Becomes:
+
+```text
+ProjectNode
+   ↑
+FilterNode (age > 20)
+   ↑
+TableScanNode
+```
+
+---
+
+# 🔥 This Is EXACTLY How Real DBs Work
+
+Even systems like:
+
+* PostgreSQL
+* MySQL
+
+use similar operator trees.
+
+---
+
+# 🚀 What’s Next (Phase 4)
+
+Now that you have a planner, next level is:
+
+### 👉 Query Optimization
+
+* Filter pushdown (already kind of done)
+* Projection pruning
+* Index scan vs full scan
+* Cost-based decisions
+
+---
+
+# 👉 Say next
+
+If you’re ready:
+
+**"phase 4 deep dive"**
+
+That’s where your DB stops being “toy” and starts becoming **engineered system**.

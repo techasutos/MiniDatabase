@@ -25,6 +25,10 @@ public class Database implements Serializable {
         schemas.put(schema.getName(), schema);
     }
 
+    public Schema removeSchema(String schemaName) {
+        return schemas.remove(schemaName);
+    }
+
     public Collection<Schema> getSchemas() {
         return schemas.values();
     }

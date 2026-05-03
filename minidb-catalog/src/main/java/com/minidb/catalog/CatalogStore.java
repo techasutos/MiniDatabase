@@ -15,6 +15,15 @@ public class CatalogStore {
     }
 
     public void save(Map<String, Database> dbs) {
+        try {
+            Path parent = file.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
         try (ObjectOutputStream oos = new ObjectOutputStream(
                 Files.newOutputStream(file))) {
             oos.writeObject(dbs);

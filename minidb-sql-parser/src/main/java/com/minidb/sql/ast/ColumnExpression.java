@@ -1,5 +1,9 @@
 package com.minidb.sql.ast;
 
+/**
+ * Represents a column reference in an expression.
+ * For example, in the expression "age > 30", "age" would be represented as a ColumnExpression.
+ */
 public class ColumnExpression implements Expression {
 
     private final String column;

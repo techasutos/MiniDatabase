@@ -20,6 +20,10 @@ public class Schema implements Serializable {
         tables.put(table.getName(), table);
     }
 
+    public Table removeTable(String tableName) {
+        return tables.remove(tableName);
+    }
+
     public Table getTable(String name) {
         return tables.get(name);
     }
