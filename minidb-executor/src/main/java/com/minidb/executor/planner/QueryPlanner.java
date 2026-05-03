@@ -36,7 +36,11 @@ public class QueryPlanner {
         this.catalog = catalog;
         this.storageEngine = storageEngine;
     }
-
+    /**
+     * Plans a SelectStatement by creating a PlanNode tree.
+     * @param stmt The parsed SelectStatement AST.
+     * @return The root of the PlanNode tree representing the execution plan.
+     */
     public PlanNode plan(SelectStatement stmt) {
 
         Table table = resolveTable(stmt.getTable());
@@ -59,7 +63,11 @@ public class QueryPlanner {
 
         return root;
     }
-
+    /**
+     * Resolves a table from the catalog using its qualified name (e.g., "db.schema.table").
+     * @param qualifiedName The fully qualified name of the table.
+     * @return The Table metadata object.
+     */
     private Table resolveTable(String qualifiedName) {
 
         String[] parts = qualifiedName.split("\\.");
