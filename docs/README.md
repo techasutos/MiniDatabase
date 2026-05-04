@@ -11,6 +11,11 @@ This folder contains implementation-level documentation for the current MiniData
   - Data persistence internals
   - Transaction and indexing behavior
 
+- `docs/End-to-End-Data-Flow.md`
+  - Narrative request-to-result explanation
+  - Parse, plan, execute, persist, and return paths
+  - Detailed explanation of how data is updated and saved
+
 - `docs/Java-Application-Integration.md`
   - How another Java application connects to MiniDatabase
   - JDBC usage examples (query, update, transaction)
@@ -22,24 +27,37 @@ This folder contains implementation-level documentation for the current MiniData
   - Connection, query, and write paths
   - Suggested DB visualization options and implementation plan
 
-- `docs/End-to-End-Data-Flow.md`
-  - Narrative request-to-result explanation
-  - Parse, plan, execute, persist, and return paths
-  - Detailed explanation of how data is updated and saved
-
 - `docs/Operations-Runbook.md`
   - Troubleshooting guide for auth failures and connection resets
   - Corruption indicators and consistency checks
   - Recovery and containment steps
   - Operational response checklist
 
+- `docs/Security-and-Hardening-Guide.md`
+  - Current security model and hardening posture
+  - Risks, gaps, and deployment recommendations
+  - Security roadmap for authz, TLS, audit, and controls
+
+- `docs/Recovery-Design-and-WAL-Roadmap.md`
+  - Current rollback behavior vs WAL capabilities
+  - Crash recovery target design
+  - WAL integration milestones and recovery roadmap
+
+- `docs/Schema-Catalog-and-Storage-Format.md`
+  - Catalog model and metadata persistence
+  - Row/page/table physical format explanation
+  - Storage-format limitations and roadmap
+
 ## Recommended reading order
 
 1. `docs/Architecture-and-Execution-Guide.md`
 2. `docs/End-to-End-Data-Flow.md`
-3. `docs/Java-Application-Integration.md`
-4. `docs/Flow-and-Visualization.md`
-5. `docs/Operations-Runbook.md`
+3. `docs/Schema-Catalog-and-Storage-Format.md`
+4. `docs/Java-Application-Integration.md`
+5. `docs/Flow-and-Visualization.md`
+6. `docs/Operations-Runbook.md`
+7. `docs/Security-and-Hardening-Guide.md`
+8. `docs/Recovery-Design-and-WAL-Roadmap.md`
 
 ## Scope notes
 
