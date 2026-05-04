@@ -1,0 +1,55 @@
+package com.minidb.common.exception;
+
+/**
+ * Structured error codes for MiniDB.
+ * Mirrors pg_error_codes design philosophy.
+ */
+public enum ErrorCode {
+
+    // Catalog
+    DATABASE_ALREADY_EXISTS,
+    DATABASE_NOT_FOUND,
+    SCHEMA_ALREADY_EXISTS,
+    SCHEMA_NOT_FOUND,
+    TABLE_ALREADY_EXISTS,
+    TABLE_NOT_FOUND,
+    COLUMN_NOT_FOUND,
+
+    // Storage
+    PAGE_READ_ERROR,
+    PAGE_WRITE_ERROR,
+    BUFFER_POOL_FULL,
+    DISK_IO_ERROR,
+    COMPACTION_ERROR,
+
+    // SQL / Parsing
+    PARSE_ERROR,
+    UNSUPPORTED_OPERATION,
+    TYPE_MISMATCH,
+    CONSTRAINT_VIOLATION,
+    NULL_CONSTRAINT_VIOLATION,
+    UNIQUE_CONSTRAINT_VIOLATION,
+    PRIMARY_KEY_VIOLATION,
+    DIVISION_BY_ZERO,
+
+    // Transaction
+    TRANSACTION_ALREADY_ACTIVE,
+    NO_ACTIVE_TRANSACTION,
+    WAL_WRITE_ERROR,
+    ROLLBACK_ERROR,
+
+    // Auth
+    AUTH_FAILED,
+    USER_NOT_FOUND,
+    USER_ALREADY_EXISTS,
+
+    // Transport / Protocol
+    CONNECTION_ERROR,
+    PROTOCOL_ERROR,
+
+    // General
+    INTERNAL_ERROR,
+    COLUMN_COUNT_MISMATCH,
+    UNSUPPORTED_TYPE
+}
+

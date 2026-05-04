@@ -10,18 +10,22 @@ public class UnaryExpression implements Expression {
         this.operand = operand;
     }
 
+    public String     getOperator() { return operator; }
+    public Expression getOperand()  { return operand; }
+
     @Override
     public Object evaluate(RowContext ctx) {
-        Object value = operand.evaluate(ctx);
-
-        if ("NOT".equals(operator)) {
-            if (!(value instanceof Boolean)) {
-                throw new IllegalArgumentException("NOT expects boolean operand");
+        switch (operator) {
+            case "NOT" -> {
+                Object value = operand.evaluate(ctx);
+                if (!(value instanceof Boolean))
+                    throw new IllegalArgumentException("NOT expects boolean operand, got: " + value);
+                return !((Boolean) value);
             }
-            return !((Boolean) value);
+            case "IS_NULL"     -> { return operand.evaluate(ctx) == null; }
+            case "IS_NOT_NULL" -> { return operand.evaluate(ctx) != null; }
+            default -> throw new IllegalArgumentException("Unsupported unary operator: " + operator);
         }
-
-        throw new IllegalArgumentException("Unsupported unary operator: " + operator);
     }
 }
 

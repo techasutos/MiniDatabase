@@ -14,18 +14,33 @@ package com.minidb.sql.ast;
 public class ColumnDefinition {
 
     private final String name;
-    private final String type;
+    private final String type;        // raw type string e.g. "VARCHAR(100)", "INT"
+    private final boolean primaryKey;
+    private final boolean notNull;
+    private final boolean unique;
+    private final Object  defaultValue;
 
+    /** Full constructor */
+    public ColumnDefinition(String name, String type,
+                            boolean primaryKey, boolean notNull,
+                            boolean unique, Object defaultValue) {
+        this.name         = name;
+        this.type         = type;
+        this.primaryKey   = primaryKey;
+        this.notNull      = notNull;
+        this.unique       = unique;
+        this.defaultValue = defaultValue;
+    }
+
+    /** Backward-compatible no-constraint constructor */
     public ColumnDefinition(String name, String type) {
-        this.name = name;
-        this.type = type;
+        this(name, type, false, false, false, null);
     }
 
-    public String getName() {
-        return name;
-    }
-
-    public String getType() {
-        return type;
-    }
+    public String  getName()         { return name; }
+    public String  getType()         { return type; }
+    public boolean isPrimaryKey()    { return primaryKey; }
+    public boolean isNotNull()       { return notNull; }
+    public boolean isUnique()        { return unique; }
+    public Object  getDefaultValue() { return defaultValue; }
 }

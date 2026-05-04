@@ -203,7 +203,6 @@ public class Engine {
      * @throws Exception If any error occurs during execution (e.g., unsupported features, table not found)
      */
     private String select(SelectStatement stmt) throws Exception {
-        ensureSelectIsSupported(stmt);
 
         PlanNode plan = planner.plan(stmt);
 

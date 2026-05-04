@@ -1,11 +1,8 @@
 package com.minidb.sql.ast;
 
 /**
- * Represents a binary expression in the SQL AST, such as "a = b" or "x > y".
- * This class evaluates the left and right expressions and applies the specified operator.
- * Supported operators include: "=", "!=", ">", "<", "+", and "-".
- * Note: For simplicity, this implementation assumes that the left and
- * right expressions evaluate to integers for comparison and arithmetic operations.
+ * Binary expression supporting: =, !=, <, <=, >, >=, AND, OR, +, -, *, /, LIKE
+ * Handles numeric comparison across INT, BIGINT, DOUBLE types.
  */
 public class BinaryExpression implements Expression {
 
@@ -14,51 +11,113 @@ public class BinaryExpression implements Expression {
     private final String op;
 
     public BinaryExpression(Expression left, Expression right, String op) {
-        this.left = left;
+        this.left  = left;
         this.right = right;
-        this.op = op;
+        this.op    = op;
     }
+
+    public Expression getLeft()  { return left; }
+    public Expression getRight() { return right; }
+    public String     getOp()    { return op; }
 
     @Override
     public Object evaluate(RowContext ctx) {
+        // Short-circuit logical operators
+        if ("AND".equals(op)) {
+            Object l = left.evaluate(ctx);
+            if (l instanceof Boolean && !(Boolean) l) return false;
+            Object r = right.evaluate(ctx);
+            return toBoolean(l) && toBoolean(r);
+        }
+        if ("OR".equals(op)) {
+            Object l = left.evaluate(ctx);
+            if (l instanceof Boolean && (Boolean) l) return true;
+            Object r = right.evaluate(ctx);
+            return toBoolean(l) || toBoolean(r);
+        }
 
         Object l = left.evaluate(ctx);
         Object r = right.evaluate(ctx);
 
-        switch (op) {
-            case "=": return l.equals(r);
-            case "!=": return !l.equals(r);
-            case ">": return toInt(l) > toInt(r);
-            case "<": return toInt(l) < toInt(r);
-            case ">=": return toInt(l) >= toInt(r);
-            case "<=": return toInt(l) <= toInt(r);
-            case "AND": return toBoolean(l) && toBoolean(r);
-            case "OR": return toBoolean(l) || toBoolean(r);
-            case "+": return toInt(l) + toInt(r);
-            case "-": return toInt(l) - toInt(r);
-            case "*": return toInt(l) * toInt(r);
-            case "/":
-                int divisor = toInt(r);
-                if (divisor == 0) {
-                    throw new ArithmeticException("Division by zero");
-                }
-                return toInt(l) / divisor;
-        }
-
-        throw new RuntimeException("Unsupported operator: " + op);
+        return switch (op) {
+            case "="    -> equalsValue(l, r);
+            case "!="   -> !equalsValue(l, r);
+            case ">"    -> compareNumeric(l, r) > 0;
+            case ">="   -> compareNumeric(l, r) >= 0;
+            case "<"    -> compareNumeric(l, r) < 0;
+            case "<="   -> compareNumeric(l, r) <= 0;
+            case "LIKE" -> likeMatch(l, r);
+            case "+"    -> addValues(l, r);
+            case "-"    -> subtractValues(l, r);
+            case "*"    -> multiplyValues(l, r);
+            case "/"    -> divideValues(l, r);
+            default -> throw new RuntimeException("Unsupported operator: " + op);
+        };
     }
 
-    private int toInt(Object value) {
-        if (!(value instanceof Number)) {
-            throw new IllegalArgumentException("Expected numeric value but got: " + value);
-        }
-        return ((Number) value).intValue();
+    // ── Helpers ────────────────────────────────────────────────────────────
+
+    private boolean equalsValue(Object l, Object r) {
+        if (l == null && r == null) return true;
+        if (l == null || r == null) return false;
+        if (l instanceof Number && r instanceof Number)
+            return toDouble(l) == toDouble(r);
+        return l.equals(r);
     }
 
-    private boolean toBoolean(Object value) {
-        if (!(value instanceof Boolean)) {
-            throw new IllegalArgumentException("Expected boolean value but got: " + value);
+    @SuppressWarnings("unchecked")
+    private int compareNumeric(Object l, Object r) {
+        if (l instanceof Number && r instanceof Number)
+            return Double.compare(toDouble(l), toDouble(r));
+        if (l instanceof Comparable && r instanceof Comparable)
+            return ((Comparable<Object>) l).compareTo(r);
+        throw new IllegalArgumentException("Cannot compare " + l + " with " + r);
+    }
+
+    private boolean likeMatch(Object l, Object r) {
+        if (l == null || r == null) return false;
+        String value   = l.toString();
+        String pattern = r.toString()
+                .replace("\\", "\\\\")
+                .replace(".", "\\.")
+                .replace("%", ".*")
+                .replace("_", ".");
+        return value.matches("(?i)" + pattern);
+    }
+
+    private Object addValues(Object l, Object r) {
+        if (l instanceof Number && r instanceof Number) {
+            if (l instanceof Double || r instanceof Double) return toDouble(l) + toDouble(r);
+            if (l instanceof Long   || r instanceof Long)   return toLong(l)   + toLong(r);
+            return toInt(l) + toInt(r);
         }
-        return (Boolean) value;
+        return l.toString() + r.toString(); // string concatenation
+    }
+
+    private Object subtractValues(Object l, Object r) {
+        if (l instanceof Double || r instanceof Double) return toDouble(l) - toDouble(r);
+        if (l instanceof Long   || r instanceof Long)   return toLong(l)   - toLong(r);
+        return toInt(l) - toInt(r);
+    }
+
+    private Object multiplyValues(Object l, Object r) {
+        if (l instanceof Double || r instanceof Double) return toDouble(l) * toDouble(r);
+        if (l instanceof Long   || r instanceof Long)   return toLong(l)   * toLong(r);
+        return toInt(l) * toInt(r);
+    }
+
+    private Object divideValues(Object l, Object r) {
+        if (toDouble(r) == 0) throw new ArithmeticException("Division by zero");
+        if (l instanceof Double || r instanceof Double) return toDouble(l) / toDouble(r);
+        if (l instanceof Long   || r instanceof Long)   return toLong(l)   / toLong(r);
+        return toInt(l) / toInt(r);
+    }
+
+    private double  toDouble(Object v) { return ((Number) v).doubleValue(); }
+    private long    toLong(Object v)   { return ((Number) v).longValue(); }
+    private int     toInt(Object v)    { return ((Number) v).intValue(); }
+    private boolean toBoolean(Object v){
+        if (v instanceof Boolean) return (Boolean) v;
+        throw new IllegalArgumentException("Expected boolean, got: " + v);
     }
 }

@@ -22,6 +22,8 @@ public class TableStorage {
 
     private final BufferPoolManager bufferPool;
     private final Table table;
+    // Monotonic page-id allocator for this table instance.
+    private int nextPageIdCounter;
 
     // Free page list for reuse (in-memory for now)
     private final java.util.Set<Integer> freePages = new java.util.HashSet<>();
@@ -48,6 +50,8 @@ public class TableStorage {
                 rootPage.markDirty();
                 bufferPool.flushPage(table.getRootPageId());
             }
+            // Initialize allocator once from current known max.
+            this.nextPageIdCounter = findMaxPageId();
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize root page header", e);
         }
@@ -110,6 +114,8 @@ public class TableStorage {
                 TablePage newPage = new TablePage(bufferPool.fetchPage(newPageId), table);
                 logPageIfNeeded(newPageId);
                 tablePage.setNextPageId(newPageId);
+                // Persist link immediately to keep chain consistent across evictions.
+                bufferPool.flushPage(page.getPageId());
                 tablePage = newPage;
                 lastPageId = newPageId;
                 break;
@@ -238,7 +244,9 @@ public class TableStorage {
             bufferPool.flushPage(reusedPageId);
             return reusedPageId;
         }
-        int newPageId = findMaxPageId() + 1;
+
+        // Monotonic allocation avoids accidental page-id reuse.
+        int newPageId = ++nextPageIdCounter;
         Page page = bufferPool.fetchPage(newPageId);
         ByteBuffer buffer = ByteBuffer.wrap(page.getData());
         buffer.putInt(0, 0); // rowCount

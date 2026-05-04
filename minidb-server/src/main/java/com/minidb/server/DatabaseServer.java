@@ -5,69 +5,76 @@ import com.minidb.catalog.CatalogStore;
 import com.minidb.executor.Engine;
 import com.minidb.sql.SQLParserService;
 import com.minidb.sql.ast.Statement;
+import com.minidb.transport.auth.InMemoryAuthService;
+import com.minidb.transport.protocol.TextProtocolHandler;
+import com.minidb.transport.tcp.TcpTransportServer;
 
-import java.io.*;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.*;
+import java.util.logging.Logger;
 
+/**
+ * MiniDB Database Server bootstrap.
+ *
+ * Wires together:
+ *  - CatalogManager  (metadata)
+ *  - Engine          (SQL execution)
+ *  - AuthService     (authentication)
+ *  - TextProtocolHandler (request/response framing)
+ *  - TcpTransportServer  (network listener)
+ *
+ * Usage: java -cp ... com.minidb.server.DatabaseServer [port] [dataDir]
+ */
 public class DatabaseServer {
+
+    private static final Logger LOG = Logger.getLogger(DatabaseServer.class.getName());
 
     public static void main(String[] args) throws Exception {
 
-        int port = 5432;
+        int    port    = args.length > 0 ? Integer.parseInt(args[0]) : 5432;
+        String dataDirStr = args.length > 1 ? args[1] : "data";
 
-        System.out.println("MiniDB starting on port " + port);
-
-        SQLParserService parser = new SQLParserService();
-        Path dataDir = Paths.get("data");
+        Path dataDir = Paths.get(dataDirStr);
         Files.createDirectories(dataDir);
-        CatalogStore catalogStore = new CatalogStore(dataDir.resolve("catalog.meta"));
-        CatalogManager catalog = new CatalogManager(catalogStore);
-        Engine engine = new Engine(dataDir, catalog);
 
-        ServerSocket serverSocket = new ServerSocket(port);
+        LOG.info("MiniDB starting — port=" + port + "  dataDir=" + dataDir.toAbsolutePath());
 
-        while (true) {
+        // ── Component wiring ──────────────────────────────────────────────
+        CatalogStore   catalogStore = new CatalogStore(dataDir.resolve("catalog.meta"));
+        CatalogManager catalog      = new CatalogManager(catalogStore);
+        Engine         engine       = new Engine(dataDir, catalog);
+        SQLParserService parser     = new SQLParserService();
 
-            Socket client = serverSocket.accept();
-
-            new Thread(() -> handleClient(client, parser, engine)).start();
+        InMemoryAuthService auth = new InMemoryAuthService();
+        // Override default credentials via env vars for production deployments
+        String adminUser = System.getenv("MINIDB_USER");
+        String adminPass = System.getenv("MINIDB_PASSWORD");
+        if (adminUser != null && adminPass != null) {
+            auth.addUser(adminUser, adminPass);
         }
-    }
 
-    private static void handleClient(Socket socket,
-                                     SQLParserService parser,
-                                     Engine engine) {
-
-        try (
-                BufferedReader in = new BufferedReader(
-                        new InputStreamReader(socket.getInputStream()));
-
-                PrintWriter out = new PrintWriter(
-                        socket.getOutputStream(), true)
-        ) {
-
-            out.println("Connected to MiniDB");
-
-            String line;
-
-            while ((line = in.readLine()) != null) {
-
-                try {
-                    Statement stmt = parser.parse(line);
-                    String result = engine.execute(stmt);
-                    out.println(result);
-
-                } catch (Exception e) {
-                    out.println("ERROR: " + e.getMessage());
-                }
+        // SQL executor: parse then execute, return result string
+        java.util.function.Function<String, String> sqlExecutor = sql -> {
+            try {
+                Statement stmt   = parser.parse(sql);
+                String    result = engine.execute(stmt);
+                return result == null ? "" : result;
+            } catch (Exception e) {
+                throw new RuntimeException(e.getMessage(), e);
             }
+        };
 
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+        TextProtocolHandler protocol  = new TextProtocolHandler(auth, sqlExecutor);
+        TcpTransportServer  transport = new TcpTransportServer(port, 50, protocol);
+
+        // ── Shutdown hook ─────────────────────────────────────────────────
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            LOG.info("Shutting down MiniDB...");
+            try { transport.stop(); } catch (Exception e) { LOG.warning("Shutdown error: " + e.getMessage()); }
+        }, "minidb-shutdown"));
+
+        transport.start();
+
+        // Block main thread
+        Thread.currentThread().join();
     }
 }

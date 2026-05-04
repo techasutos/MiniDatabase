@@ -29,8 +29,8 @@ public class Table implements Serializable {
             Column col = columns.get(i);
             columnIndex.put(col.getName(), i);
 
-            // CRITICAL: compute row size
-            size += col.getType().getSize();
+            // CRITICAL: compute row size (use storageSize for VARCHAR(n) support)
+            size += col.getStorageSize();
         }
 
         this.rowSize = size;

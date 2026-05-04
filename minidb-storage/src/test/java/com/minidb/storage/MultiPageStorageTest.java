@@ -13,6 +13,10 @@ import static org.junit.jupiter.api.Assertions.*;
 public class MultiPageStorageTest {
     @Test
     void testInsertAndScanMultiPage() throws Exception {
+        // Ensure deterministic test run.
+        java.nio.file.Path dbPath = java.nio.file.Paths.get("test-multipage.db");
+        java.nio.file.Files.deleteIfExists(dbPath);
+
         Table table = new Table(1, "users", List.of(
                 new Column("id", DataType.INT),
                 new Column("name", DataType.STRING)
@@ -31,4 +35,3 @@ public class MultiPageStorageTest {
         assertEquals(rows - 1, all.get(rows - 1).getValues().get(0));
     }
 }
-

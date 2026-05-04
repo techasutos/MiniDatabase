@@ -2961,3 +2961,147 @@ If you’re ready:
 **"phase 4 deep dive"**
 
 That’s where your DB stops being “toy” and starts becoming **engineered system**.
+
+---
+
+# Implementation Status (2026-05-05)
+
+This section is the authoritative scaffold for what is actually implemented in code now, what is pending, and how to use each implemented capability.
+
+## Implemented
+
+### Core Architecture
+- Multi-module Maven project wired and building end-to-end.
+- Layered modules in place: `minidb-common`, `minidb-catalog`, `minidb-sql-parser`, `minidb-storage`, `minidb-executor`, `minidb-transaction`, `minidb-transport`, `minidb-server`, `minidb-jdbc`, `minidb-client`.
+- Transport/protocol/auth split implemented (`TcpTransportServer`, `TextProtocolHandler`, `AuthService`).
+
+### Catalog + DDL
+- Create/drop database, schema, table execution path.
+- Column typing expanded beyond basic `INT`/`STRING` with SQL type parsing.
+- Column metadata carries constraints (`PRIMARY KEY`, `NOT NULL`, `UNIQUE`, `DEFAULT`) in AST/model.
+
+### SQL Parser + AST + Planner
+- ANTLR parser integrated.
+- AST supports DDL, DML (`INSERT`, `UPDATE`, `DELETE`), transactions (`BEGIN`/`COMMIT`/`ROLLBACK`).
+- Expressions support boolean logic, arithmetic, comparison, and `LIKE`.
+- Physical planning/execution includes scan/filter/project plus aggregate/sort/limit nodes.
+
+### Storage Engine
+- Page-based storage with table-page chaining.
+- Multi-page table insert/scan working.
+- Update/delete/compaction methods implemented in `TableStorage`.
+- Buffer pool uses LRU-style cache with dirty-page flush.
+- Free-page reuse hooks exist.
+
+### Indexing
+- B+Tree and `IndexManager` scaffold implemented (in-memory index path).
+
+### Transactions + WAL
+- `WalManager` and `TransactionManager` implemented with BEGIN/COMMIT/ABORT logging.
+- Recovery helper methods available for WAL replay planning.
+
+### JDBC + Client + Server
+- JDBC driver/connection/statement/prepared-statement/result-set baseline implemented and compile-stable.
+- SPI registration file present at `minidb-jdbc/src/main/resources/META-INF/services/java.sql.Driver`.
+- CLI client implemented for interactive SQL over TCP.
+- Server bootstrap wired to catalog + parser + engine + protocol + transport.
+
+### Verification Status
+- `mvn clean install -DskipTests` succeeds.
+- `mvn test` succeeds across all modules.
+
+---
+
+## Usage (Implemented Paths)
+
+### 1) Build and test
+```powershell
+Set-Location "D:\projects\MiniDatabase"
+mvn clean install -DskipTests --no-transfer-progress
+mvn test --no-transfer-progress
+```
+
+### 2) Start server
+```powershell
+Set-Location "D:\projects\MiniDatabase"
+mvn -pl minidb-server -am exec:java -Dexec.mainClass="com.minidb.server.DatabaseServer"
+```
+
+### 3) Start CLI client
+```powershell
+Set-Location "D:\projects\MiniDatabase"
+mvn -pl minidb-client -am exec:java -Dexec.mainClass="com.minidb.client.MiniDbClient"
+```
+
+### 4) JDBC URL
+- URL: `jdbc:minidb://localhost:5432/`
+- Properties: `user`, `password`
+
+### 5) SQL currently usable
+```sql
+CREATE DATABASE testdb
+CREATE SCHEMA testdb.public
+CREATE TABLE testdb.public.users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)
+
+INSERT INTO testdb.public.users VALUES (1, 'Alice')
+UPDATE testdb.public.users SET name = 'Alicia' WHERE id = 1
+DELETE FROM testdb.public.users WHERE id = 1
+
+SELECT * FROM testdb.public.users
+SELECT COUNT(*), AVG(id) FROM testdb.public.users
+SELECT id, name FROM testdb.public.users ORDER BY id DESC LIMIT 10 OFFSET 0
+
+BEGIN
+COMMIT
+ROLLBACK
+```
+
+---
+
+## Pending (Next Engineering Milestones)
+
+### Transaction correctness
+- Wire `TransactionManager`/WAL into executor/storage mutation paths for true atomic commit/rollback.
+- Add UNDO/REDO recovery bootstrap in server startup.
+- Add isolation levels (`READ COMMITTED` first, then `REPEATABLE READ` behavior).
+
+### Storage hardening
+- Persist free-page map to disk (currently in-memory lifecycle).
+- Stabilize row-level tombstones + vacuum/compaction policy.
+- Add checksum/page-versioning and page-format migration hooks.
+
+### Index integration
+- Planner cost rules to choose index scan vs full scan.
+- Index maintenance on insert/update/delete integrated transactionally.
+- Persist index structures on disk.
+
+### SQL coverage
+- JOIN execution (nested-loop first, then hash join).
+- `GROUP BY` correctness edge cases and HAVING with aliases.
+- `ALTER TABLE`, secondary constraints, and better diagnostics.
+
+### JDBC compliance
+- Expand metadata fidelity (`DatabaseMetaData`, `ResultSetMetaData`) and edge-case behavior.
+- Increase TCK-like coverage for statement/result semantics.
+
+### Security + ops
+- Persistent user/role/grant catalog (replace in-memory auth).
+- TLS transport option.
+- Structured logging + metrics + health endpoint.
+
+---
+
+## Future Enhancements (Post-Foundation)
+
+- MVCC tuple-version visibility model.
+- Cost-based optimizer with statistics catalog.
+- Background checkpointing and WAL segment management.
+- Replication protocol (logical first, physical later).
+- Online index build and DDL concurrency control.
+- Pluggable storage formats (row-store + columnar experiment path).
+
+---
+
+## On PostgreSQL/MySQL parity
+
+Parity target is multi-phase, not immediate. Current system is a strong mini-engine foundation with working end-to-end SQL, storage, server, client, and JDBC path. Next priorities are transactional correctness under failures, index-aware planning, and broader SQL semantics before advanced optimizer/HA features.
