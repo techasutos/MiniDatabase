@@ -9,7 +9,7 @@ It focuses on the implementation that is actually present now:
 - Page-based storage engine
 - Buffer pool caching
 - Engine-managed transactions
-- WAL and transaction manager primitives that exist in code, but are not yet fully wired into startup recovery flow
+- WAL-backed startup recovery baseline with checkpoints and truncation
 
 ---
 
@@ -25,10 +25,9 @@ It focuses on the implementation that is actually present now:
 - Post-incident follow-up
 
 ### What is not fully supported yet
-- Automated crash recovery at startup using WAL replay
 - TLS transport encryption
 - Persistent user/role/grant authorization
-- Full WAL-backed transactional durability for all DML paths
+- Full production-hardened transactional durability for all concurrency scenarios
 - Online consistency checking tools
 
 When a recovery step refers to WAL, treat it as a controlled/manual engineering workflow for now, not a fully automated production recovery subsystem.
@@ -41,7 +40,9 @@ When a recovery step refers to WAL, treat it as a controlled/manual engineering 
 Assuming default startup data directory `data`:
 - Catalog metadata: `data/catalog.meta`
 - Data file: `data/minidb.data`
-- WAL file: only when explicitly wired/created in transaction integration flow; currently primitives exist in code but startup wiring is still pending
+- WAL file: `data/minidb.wal`
+- WAL segments: `data/minidb.wal.segments/`
+- Checkpoint metadata: `data/minidb.wal.checkpoint`
 
 ### Main runtime components
 - Server bootstrap: `minidb-server/src/main/java/com/minidb/server/DatabaseServer.java`
@@ -267,21 +268,16 @@ If storage inconsistency is suspected:
 5. Recreate schema objects if necessary.
 6. Restore/replay data from application source of truth or engineering export.
 
-## 9.4 WAL-assisted recovery (engineering/manual only for now)
-Current code contains:
-- `WalManager.readAll()`
-- `TransactionManager.recoverCommittedTxIds()`
+## 9.4 WAL-aware recovery notes (current baseline)
+Current runtime performs startup replay before accepting client traffic.
 
-This means manual engineering recovery can inspect WAL records, but the server does not yet automatically replay them at startup.
-
-Recommended manual path:
+Operational guidance:
 1. Stop server.
-2. Preserve data files and WAL file.
-3. Use a controlled engineering utility/test harness to inspect WAL records.
-4. Determine committed transaction set.
-5. Apply custom replay logic in a maintenance branch/tool if required.
+2. Preserve `data` directory including `minidb.wal`, `minidb.wal.segments/`, and `minidb.wal.checkpoint`.
+3. Restart server and verify recovery completion log lines.
+4. Validate key tables with row-count and spot-check queries.
 
-Do not treat WAL as a production-ready self-healing path yet.
+Manual engineering recovery may still be needed for severe corruption scenarios; CRC validation now fails fast on corrupted WAL records.
 
 ---
 

@@ -27,6 +27,7 @@ public class MiniDbConnection implements Connection {
     private boolean readOnly    = false;
     private String  catalog     = null;
     private int     holdability = ResultSet.CLOSE_CURSORS_AT_COMMIT;
+    private final Map<String, String> serverCapabilities = new LinkedHashMap<>();
 
     MiniDbConnection(String host, int port, String user, String password) throws SQLException {
         try {
@@ -46,6 +47,9 @@ public class MiniDbConnection implements Connection {
             String authResult = in.readLine();
             if (!"OK".equals(authResult))
                 throw new SQLException("Authentication failed: " + authResult);
+
+            // Optional capability negotiation for newer servers.
+            discoverServerCapabilities();
 
             LOG.fine("Connected to MiniDB at " + host + ":" + port);
 
@@ -176,6 +180,29 @@ public class MiniDbConnection implements Connection {
             closed = true;
             throw new SQLException("Lost connection to server: " + e.getMessage(), e);
         }
+    }
+
+    private void discoverServerCapabilities() {
+        try {
+            List<String> lines = execute("CAPABILITIES");
+            for (String line : lines) {
+                int sep = line.indexOf('=');
+                if (sep <= 0 || sep >= line.length() - 1) {
+                    continue;
+                }
+                String key = line.substring(0, sep).trim();
+                String value = line.substring(sep + 1).trim();
+                if (!key.isEmpty()) {
+                    serverCapabilities.put(key, value);
+                }
+            }
+        } catch (SQLException ignored) {
+            // Old servers may not support CAPABILITIES; keep connection usable.
+        }
+    }
+
+    Map<String, String> getServerCapabilitiesSnapshot() {
+        return new LinkedHashMap<>(serverCapabilities);
     }
 
     private void checkOpen() throws SQLException {

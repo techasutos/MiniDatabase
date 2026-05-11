@@ -20,18 +20,18 @@ public class AggregateNode implements PlanNode {
     private final List<Expression>  groupByExprs;
     private final List<SelectItem>  selectItems;
     private final Expression        having;
-    private final List<String>      inputColumnNames;
+    private final com.minidb.catalog.model.Table inputTable;
 
     public AggregateNode(PlanNode child,
                          List<Expression>  groupByExprs,
                          List<SelectItem>  selectItems,
                          Expression        having,
-                         List<String>      inputColumnNames) {
+                         com.minidb.catalog.model.Table inputTable) {
         this.child            = child;
         this.groupByExprs     = groupByExprs;
         this.selectItems      = selectItems;
         this.having           = having;
-        this.inputColumnNames = inputColumnNames;
+        this.inputTable       = inputTable;
     }
 
     @Override
@@ -139,11 +139,7 @@ public class AggregateNode implements PlanNode {
     }
 
     private Object evalRow(Row row, Expression expr) {
-        Map<String, Object> map = new HashMap<>();
-        for (int i = 0; i < inputColumnNames.size(); i++) {
-            map.put(inputColumnNames.get(i), row.getValues().get(i));
-        }
-        return expr.evaluate(new RowContext(map));
+        return expr.evaluate(new RowContext(RowContextBuilder.build(inputTable, row)));
     }
 
     private Map<String, Object> buildOutputContext(Row row) {

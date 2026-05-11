@@ -4,6 +4,7 @@ import com.minidb.storage.engine.TableStorage;
 import com.minidb.storage.row.Row;
 
 import java.util.List;
+import java.util.function.Consumer;
 /**
  * TableScanNode is a physical plan node that performs a full table scan.
  * It retrieves all rows from the specified table storage.
@@ -27,5 +28,10 @@ public class TableScanNode implements PlanNode {
     @Override
     public List<Row> execute() throws Exception {
         return storage.scan();
+    }
+
+    @Override
+    public void forEachRow(Consumer<Row> consumer) throws Exception {
+        storage.scan(consumer);
     }
 }

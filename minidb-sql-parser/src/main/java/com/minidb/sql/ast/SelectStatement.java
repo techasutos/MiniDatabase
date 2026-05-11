@@ -19,6 +19,7 @@ public class SelectStatement implements Statement {
 
     private final List<SelectItem> items;
     private final String table;
+    private final List<JoinClause> joins;
     private final Expression where;
     private final List<Expression> groupBy;
     private final Expression having;
@@ -26,11 +27,12 @@ public class SelectStatement implements Statement {
     private final int limit;   // -1 = no limit
     private final int offset;  // 0 = no offset
 
-    public SelectStatement(List<SelectItem> items, String table, Expression where,
-                           List<Expression> groupBy, Expression having,
+    public SelectStatement(List<SelectItem> items, String table, List<JoinClause> joins,
+                           Expression where, List<Expression> groupBy, Expression having,
                            List<OrderByItem> orderBy, int limit, int offset) {
         this.items   = items;
         this.table   = table;
+        this.joins   = joins;
         this.where   = where;
         this.groupBy = groupBy;
         this.having  = having;
@@ -41,11 +43,12 @@ public class SelectStatement implements Statement {
 
     /** Backward-compatible constructor (no GROUP BY / ORDER BY / LIMIT) */
     public SelectStatement(List<SelectItem> items, String table, Expression where) {
-        this(items, table, where, List.of(), null, List.of(), -1, 0);
+        this(items, table, List.of(), where, List.of(), null, List.of(), -1, 0);
     }
 
     public List<SelectItem>  getItems()   { return items; }
     public String            getTable()   { return table; }
+    public List<JoinClause>  getJoins()   { return joins; }
     public Expression        getWhere()   { return where; }
     public List<Expression>  getGroupBy() { return groupBy; }
     public Expression        getHaving()  { return having; }
@@ -53,6 +56,7 @@ public class SelectStatement implements Statement {
     public int               getLimit()   { return limit; }
     public int               getOffset()  { return offset; }
 
+    public boolean hasJoins()   { return !joins.isEmpty(); }
     public boolean hasGroupBy() { return !groupBy.isEmpty(); }
     public boolean hasOrderBy() { return !orderBy.isEmpty(); }
     public boolean hasLimit()   { return limit >= 0; }

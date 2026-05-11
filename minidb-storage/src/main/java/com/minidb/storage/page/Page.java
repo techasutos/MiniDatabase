@@ -21,11 +21,13 @@ public class Page {
     private final int pageId;
     private final byte[] data;
     private boolean dirty;
+    private long pageLsn;
 
     public Page(int pageId) {
         this.pageId = pageId;
         this.data = new byte[PAGE_SIZE];
         this.dirty = false;
+        this.pageLsn = 0L;
     }
 
     public int getPageId() {
@@ -47,5 +49,13 @@ public class Page {
 
     public boolean isDirty() {
         return dirty;
+    }
+
+    public long getPageLsn() {
+        return pageLsn;
+    }
+
+    public void setPageLsn(long pageLsn) {
+        this.pageLsn = pageLsn;
     }
 }

@@ -116,6 +116,32 @@ public class TransactionManager {
         return currentTx.get() != null;
     }
 
+    public boolean hasAnyActiveTx() {
+        return txTable.containsValue(TxState.ACTIVE);
+    }
+
+    public long getFlushedLsn() {
+        return wal.getFlushedLsn();
+    }
+
+    public void flushWalUpTo(long lsn) throws IOException {
+        wal.flush(lsn);
+    }
+
+    public long latestCheckpointLsn() throws IOException {
+        return wal.latestCheckpointLsn();
+    }
+
+    public long writeCheckpoint() throws IOException {
+        long checkpointLsn = wal.checkpoint(0L);
+        wal.flush(checkpointLsn);
+        return checkpointLsn;
+    }
+
+    public void truncateWalBefore(long keepFromLsn) throws IOException {
+        wal.truncateBeforeLsn(keepFromLsn);
+    }
+
     /**
      * Return all WAL records for crash recovery (REDO pass).
      */
@@ -138,6 +164,10 @@ public class TransactionManager {
             txIdGen.updateAndGet(v -> Math.max(v, record.txId() + 1));
         }
         return committed;
+    }
+
+    public void close() throws IOException {
+        wal.close();
     }
 
     // ── Internal ───────────────────────────────────────────────────────────

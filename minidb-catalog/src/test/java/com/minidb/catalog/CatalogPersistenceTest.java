@@ -31,6 +31,10 @@ class CatalogPersistenceTest {
 		assertNotNull(reader.getDatabase("testdb"));
 		assertNotNull(reader.getDatabase("testdb").getSchema("analytics"));
 		assertNotNull(reader.getDatabase("testdb").getSchema("analytics").getTable("users"));
+		assertEquals(List.of("testdb"), reader.listDatabaseNames());
+		assertEquals(List.of("analytics", "public"), reader.listSchemaNames("testdb"));
+		assertEquals(List.of("users"), reader.listTableNames("testdb", "analytics"));
+		assertEquals(List.of("id:INT", "name:STRING"), reader.listColumnDefinitions("testdb", "analytics", "users"));
 	}
 }
 

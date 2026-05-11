@@ -135,6 +135,19 @@ Protocol sequence:
 7. Server responds with lines and trailing `END`.
 8. Client sends `QUIT` to close.
 
+Capability introspection command (optional):
+
+- Client -> `CAPABILITIES`
+- Server -> `key=value` lines
+- Server -> `END`
+
+Example keys currently exposed:
+
+- `PROTOCOL`
+- `AUTH`
+- `FRAMING`
+- `FEATURES`
+
 Minimal raw socket sample:
 
 ```java

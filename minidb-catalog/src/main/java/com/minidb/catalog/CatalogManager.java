@@ -33,6 +33,53 @@ public class CatalogManager {
         return db;
     }
 
+    public synchronized List<String> listDatabaseNames() {
+        List<String> names = new ArrayList<>(databases.keySet());
+        Collections.sort(names);
+        return names;
+    }
+
+    public synchronized List<String> listSchemaNames(String dbName) {
+        Database db = getDatabase(dbName);
+        List<String> names = new ArrayList<>();
+        for (Schema schema : db.getSchemas()) {
+            names.add(schema.getName());
+        }
+        Collections.sort(names);
+        return names;
+    }
+
+    public synchronized List<String> listTableNames(String dbName, String schemaName) {
+        Database db = getDatabase(dbName);
+        Schema schema = db.getSchema(schemaName);
+        if (schema == null) {
+            throw new RuntimeException("Schema not found");
+        }
+        List<String> names = new ArrayList<>();
+        for (Table table : schema.getTables()) {
+            names.add(table.getName());
+        }
+        Collections.sort(names);
+        return names;
+    }
+
+    public synchronized List<String> listColumnDefinitions(String dbName, String schemaName, String tableName) {
+        Database db = getDatabase(dbName);
+        Schema schema = db.getSchema(schemaName);
+        if (schema == null) {
+            throw new RuntimeException("Schema not found");
+        }
+        Table table = schema.getTable(tableName);
+        if (table == null) {
+            throw new RuntimeException("Table not found");
+        }
+        List<String> defs = new ArrayList<>();
+        for (Column column : table.getColumns()) {
+            defs.add(column.getName() + ":" + column.getType().name());
+        }
+        return defs;
+    }
+
     public synchronized void createSchema(String dbName, String schemaName) {
         Database db = getDatabase(dbName);
         db.addSchema(new Schema(schemaName));
@@ -82,8 +129,24 @@ public class CatalogManager {
             throw new RuntimeException("Schema not found");
 
         int tableId = schema.getTables().size();
-        schema.addTable(new Table(tableId, tableName, columns));
+        Table table = new Table(tableId, tableName, columns);
+        table.setRootPageId(nextRootPageId());
+        schema.addTable(table);
         persistIfConfigured();
+    }
+
+    private int nextRootPageId() {
+        int max = -1;
+        for (Database db : databases.values()) {
+            for (Schema schema : db.getSchemas()) {
+                for (Table table : schema.getTables()) {
+                    if (table.getRootPageId() > max) {
+                        max = table.getRootPageId();
+                    }
+                }
+            }
+        }
+        return max + 1;
     }
 
     private void persistIfConfigured() {

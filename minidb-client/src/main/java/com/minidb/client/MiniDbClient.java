@@ -11,7 +11,7 @@ import java.util.logging.Logger;
  * Usage:
  *   java -cp ... com.minidb.client.MiniDbClient [host] [port] [user] [password]
  *
- * Defaults: host=localhost, port=5432, user=admin, password=minidb
+ * Defaults: host=localhost, port=5544, user=admin, password=minidb
  *
  * Commands:
  *   Any SQL statement terminated by pressing Enter.
@@ -24,7 +24,7 @@ public class MiniDbClient {
 
     public static void main(String[] args) throws Exception {
         String host     = args.length > 0 ? args[0] : "localhost";
-        int    port     = args.length > 1 ? Integer.parseInt(args[1]) : 5432;
+        int    port     = args.length > 1 ? Integer.parseInt(args[1]) : 5544;
         String user     = args.length > 2 ? args[2] : "admin";
         String password = args.length > 3 ? args[3] : "minidb";
 
@@ -75,6 +75,9 @@ public class MiniDbClient {
                     printHelp();
                     continue;
                 }
+                if ("\\capabilities".equalsIgnoreCase(line)) {
+                    line = "CAPABILITIES";
+                }
 
                 // Send SQL
                 out.println(line);
@@ -120,6 +123,7 @@ public class MiniDbClient {
                 │                                                             │
                 │  Client:                                                    │
                 │    HELP  — this message                                     │
+                │    \\capabilities — show server protocol features           │
                 │    QUIT  — disconnect                                       │
                 └─────────────────────────────────────────────────────────────┘
                 """);

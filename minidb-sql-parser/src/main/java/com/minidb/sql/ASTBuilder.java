@@ -41,6 +41,13 @@ public class ASTBuilder extends SQLBaseVisitor<Object> {
 
         String table = ctx.tableSource().qualifiedName().getText();
 
+        List<JoinClause> joins = new ArrayList<>();
+        if (ctx.joinClause() != null) {
+            for (var joinCtx : ctx.joinClause()) {
+                joins.add((JoinClause) visit(joinCtx));
+            }
+        }
+
         // WHERE
         Expression where = ctx.whereClause() != null
                 ? (Expression) visit(ctx.whereClause().expression()) : null;
@@ -77,7 +84,15 @@ public class ASTBuilder extends SQLBaseVisitor<Object> {
             }
         }
 
-        return new SelectStatement(items, table, where, groupBy, having, orderBy, limit, offset);
+        return new SelectStatement(items, table, joins, where, groupBy, having, orderBy, limit, offset);
+    }
+
+    @Override
+    public JoinClause visitJoinClause(SQLParser.JoinClauseContext ctx) {
+
+        String table = ctx.tableSource().qualifiedName().getText();
+        Expression condition = (Expression) visit(ctx.expression());
+        return new JoinClause(table, condition);
     }
 
     // ── DML ────────────────────────────────────────────────────────────────

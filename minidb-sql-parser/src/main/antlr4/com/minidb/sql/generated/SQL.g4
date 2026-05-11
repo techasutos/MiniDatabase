@@ -110,7 +110,11 @@ rollbackTransaction
     ;
 
 selectStatement
-    : SELECT selectElements FROM tableSource whereClause? groupByClause? havingClause? orderByClause? limitClause?
+    : SELECT selectElements FROM tableSource joinClause* whereClause? groupByClause? havingClause? orderByClause? limitClause?
+    ;
+
+joinClause
+    : (INNER)? JOIN tableSource ON expression
     ;
 
 selectElements

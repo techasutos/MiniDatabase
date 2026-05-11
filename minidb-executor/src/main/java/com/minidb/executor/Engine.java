@@ -7,13 +7,17 @@ import com.minidb.executor.planner.physical.PlanNode;
 import com.minidb.sql.ast.*;
 import com.minidb.storage.engine.StorageEngine;
 import com.minidb.storage.engine.TableStorage;
+import com.minidb.storage.page.Page;
 import com.minidb.storage.row.Row;
+import com.minidb.tx.TransactionManager;
+import com.minidb.tx.WalManager;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Logger;
 
 /**
  * The main entry point for executing SQL statements.
@@ -29,17 +33,26 @@ import java.util.Map;
  */
 public class Engine {
 
+    private static final Logger LOG = Logger.getLogger(Engine.class.getName());
+
     private final CatalogManager catalog;
     private final StorageEngine storageEngine;
     private final QueryPlanner planner;
+    private final TransactionManager transactionManager;
     private final Map<String, TableStorage> tableStorageCache = new HashMap<>();
-    private boolean transactionActive;
 
     public Engine(Path dataDir, CatalogManager catalog) throws Exception {
         this.catalog = catalog;
 
+        // Initialize WAL and TransactionManager first so the buffer pool can enforce pageLSN <= flushedLSN.
+        Path walPath = dataDir.resolve("minidb.wal");
+        WalManager walManager = new WalManager(walPath);
+        this.transactionManager = new TransactionManager(walManager);
+
         this.storageEngine = new StorageEngine(
-                dataDir.resolve("minidb.data").toString()
+                dataDir.resolve("minidb.data").toString(),
+                transactionManager::getFlushedLsn,
+                transactionManager::flushWalUpTo
         );
 
         this.planner = new QueryPlanner(catalog, storageEngine);
@@ -142,14 +155,16 @@ public class Engine {
                 int columnIndex = table.getColumnIndex(stmt.getColumnNames().get(i));
                 orderedValues.set(columnIndex, values.get(i));
             }
-            if (orderedValues.contains(null)) {
-                throw new UnsupportedOperationException("Partial column INSERT is not implemented yet");
-            }
-        }
+             if (orderedValues.contains(null)) {
+                 throw new UnsupportedOperationException("Partial column INSERT is not implemented yet");
+             }
+         }
 
-        storage.insert(new Row(orderedValues));
+         Row row = new Row(orderedValues);
 
-        return "OK";
+         storage.insert(row);
+
+         return "OK";
     }
 
     /**
@@ -206,13 +221,9 @@ public class Engine {
 
         PlanNode plan = planner.plan(stmt);
 
-        List<Row> rows = plan.execute();
-
         StringBuilder result = new StringBuilder();
 
-        for (Row r : rows) {
-            result.append(r.getValues()).append("\n");
-        }
+        plan.forEachRow(r -> result.append(r.getValues()).append("\n"));
 
         return result.toString();
     }
@@ -228,64 +239,75 @@ public class Engine {
      * @return A string indicating that the transaction has started (e.g., "TRANSACTION STARTED")
      * @throws IllegalStateException If a transaction is already active
      */
-    private String beginTransaction() {
-        if (transactionActive) {
-            throw new IllegalStateException("Transaction already active");
-        }
-        transactionActive = true;
-        for (TableStorage storage : tableStorageCache.values()) {
-            storage.beginTransaction();
-        }
-        return "TRANSACTION STARTED";
-    }
-    /**
-     * Handles the execution of a COMMIT statement.
-     * It checks if a transaction is active and throws an exception if it is not.
-     * Otherwise, it commits the transaction on all currently cached TableStorage instances
-     * and sets the transaction state to inactive.
-     * The method returns a string indicating that the transaction has been committed.
-     * Note: This implementation assumes a simple transaction model where all operations are
-     * part of a single transaction. In a more complex system, you would want to support multiple
-     * concurrent transactions and more robust isolation levels.
-     *
-     * @return A string indicating that the transaction has been committed (e.g., "TRANSACTION COMMITTED")
-     * @throws IllegalStateException If no transaction is active
-     */
-    private String commitTransaction() {
-        if (!transactionActive) {
-            throw new IllegalStateException("No active transaction");
-        }
-        for (TableStorage storage : tableStorageCache.values()) {
-            storage.commitTransaction();
-        }
-        transactionActive = false;
-        return "TRANSACTION COMMITTED";
-    }
-    /**
-     * Handles the execution of a ROLLBACK statement.
-     * It checks if a transaction is active and throws an exception if it is not.
-     * Otherwise, it rolls back the transaction on all currently cached TableStorage instances
-     * and sets the transaction state to inactive.
-     * The method returns a string indicating that the transaction has been rolled back.
-     * Note: This implementation assumes a simple transaction model where all operations are
-     * part of a single transaction. In a more complex system, you would want to support multiple
-     * concurrent transactions and more robust isolation levels.
-     *
-     * @return A string indicating that the transaction has been rolled back (e.g., "TRANSACTION ROLLED BACK")
-     * @throws IllegalStateException If no transaction is active
-     */
-    private String rollbackTransaction() throws Exception {
-        if (!transactionActive) {
-            throw new IllegalStateException("No active transaction");
-        }
-        for (TableStorage storage : tableStorageCache.values()) {
-            storage.rollbackTransaction();
-        }
-        transactionActive = false;
-        return "TRANSACTION ROLLED BACK";
-    }
+     private String beginTransaction() throws Exception {
+         if (transactionManager.hasActiveTx()) {
+             throw new IllegalStateException("Transaction already active (txId=" + transactionManager.currentTxId() + ")");
+         }
+         
+         // Start transaction in TransactionManager and get txId
+         long newTxId = transactionManager.begin();
+         
+         LOG.info("Transaction began: txId=" + newTxId);
+         return "TRANSACTION STARTED (txId=" + newTxId + ")";
+     }
+     /**
+      * Handles the execution of a COMMIT statement.
+      * Logs the COMMIT record to WAL, then flushes to disk before returning.
+      * This ensures durability of all committed changes.
+      *
+      * @return A string indicating the transaction has been committed
+      * @throws IllegalStateException If no transaction is active
+      */
+     private String commitTransaction() throws Exception {
+         Long txId = transactionManager.currentTxId();
+         if (txId == null) {
+             throw new IllegalStateException("No active transaction");
+         }
+         
+         // Commit in TransactionManager (logs COMMIT record to WAL and flushes)
+         transactionManager.commit();
+         // After WAL is durable, data pages are allowed to flush by the WAL gate.
+         storageEngine.getBufferPool().flushAll();
+         
+         LOG.info("Transaction committed: txId=" + txId);
+         return "TRANSACTION COMMITTED (txId=" + txId + ")";
+     }
 
-    // ================= RESOLUTION =================
+     /**
+      * Perform a quiescent checkpoint and prune old WAL history.
+      * Safe mode: requires no active transactions and flushes all dirty pages first.
+      */
+     public synchronized long checkpointAndTruncateWal() throws Exception {
+         if (transactionManager.hasAnyActiveTx()) {
+             throw new IllegalStateException("Cannot checkpoint while transactions are active");
+         }
+         storageEngine.getBufferPool().flushAll();
+         long checkpointLsn = transactionManager.writeCheckpoint();
+         transactionManager.truncateWalBefore(checkpointLsn);
+         LOG.info("Checkpoint completed at LSN=" + checkpointLsn);
+         return checkpointLsn;
+     }
+     /**
+      * Handles the execution of a ROLLBACK statement.
+      * Logs the ABORT record to WAL and rolls back changes.
+      *
+      * @return A string indicating the transaction has been rolled back
+      * @throws IllegalStateException If no transaction is active
+      */
+     private String rollbackTransaction() throws Exception {
+          Long txId = transactionManager.currentTxId();
+          if (txId == null) {
+              throw new IllegalStateException("No active transaction");
+          }
+          
+          // Rollback in TransactionManager (logs ABORT record)
+          transactionManager.rollback();
+          
+          LOG.info("Transaction rolled back: txId=" + txId);
+          return "TRANSACTION ROLLED BACK (txId=" + txId + ")";
+     }
+
+     // ================= RESOLUTION =================
     /**
      * Resolves a fully qualified table name (in the format "db.schema.table") to a Table object from the catalog.
      * The method splits the qualified name into its components and navigates through the catalog to find the corresponding Table.
@@ -322,8 +344,8 @@ public class Engine {
     private TableStorage getTableStorage(String qualifiedName, Table table) throws Exception {
         TableStorage storage = tableStorageCache.get(qualifiedName);
         if (storage == null) {
-            storage = new TableStorage(storageEngine.getBufferPool(), table);
-            if (transactionActive) {
+            storage = new TableStorage(storageEngine.getBufferPool(), table, transactionManager);
+            if (transactionManager.hasActiveTx()) {
                 storage.beginTransaction();
             }
             tableStorageCache.put(qualifiedName, storage);
@@ -339,10 +361,10 @@ public class Engine {
      * Note: This implementation assumes that the predicate expression can be evaluated directly against the row context.
      * In a more complex system, you would want to support more complex expressions and possibly a more robust expression evaluation mechanism.
      *
-     * @param table
-     * @param row
-     * @param predicate
-     * @return
+     * @param table The Table object representing the schema of the row
+     * @param row The Row object to evaluate against the predicate
+     * @param predicate The predicate expression to evaluate
+     * @return true if the row matches the predicate, false otherwise
      */
     private boolean matches(Table table, Row row, Expression predicate) {
         if (predicate == null) {
@@ -394,66 +416,100 @@ public class Engine {
             values.put(table.getName() + "." + columnName, value);
         }
         return new RowContext(values);
-    }
-    /**
-     * Checks if the given SELECT statement contains any unsupported features, such as aggregate functions.
-     * It iterates through the SELECT items and the WHERE clause (if present) to check for the presence of aggregate functions.
-     * If any aggregate function is found, it throws an UnsupportedOperationException indicating that this feature is not implemented yet.
-     * Note: This method is a temporary measure to ensure that only supported features are executed.
-     * In a future implementation, you would want to fully support aggregate functions and remove this check.
-     *
-     * @param stmt The SelectStatement to check for unsupported features
-     * @throws UnsupportedOperationException If any unsupported features are found in the SELECT statement
-     */
-    private void ensureSelectIsSupported(SelectStatement stmt) {
-        for (SelectItem item : stmt.getItems()) {
-            if (containsAggregate(item.getExpression())) {
-                throw new UnsupportedOperationException("Aggregate functions are not implemented yet");
-            }
-        }
-        if (stmt.getWhere() != null && containsAggregate(stmt.getWhere())) {
-            throw new UnsupportedOperationException("Aggregate functions in WHERE are not implemented yet");
-        }
-    }
-    /**
-     * Recursively checks if a given expression contains any aggregate function calls.
-     * It checks if the expression is a FunctionCallExpression (indicating an aggregate function)
-     * or if it is a BinaryExpression or UnaryExpression that contains an aggregate function in its sub-expressions.
-     * The method uses reflection to access the left and right sub-expressions of BinaryExpression
-     * and the operand of UnaryExpression, allowing it to traverse the expression tree without relying on specific getters.
-     * Note: This method is a temporary measure to detect unsupported features.
-     * In a future implementation, you would want to fully support aggregate functions and remove this check.
-     *
-     * @param expression The Expression to check for aggregate functions
-     * @return true if the expression contains an aggregate function, false otherwise
-     */
-    private boolean containsAggregate(Expression expression) {
-        if (expression == null) {
-            return false;
-        }
-        if (expression instanceof FunctionCallExpression) {
-            return true;
-        }
-        if (expression instanceof BinaryExpression binary) {
-            try {
-                java.lang.reflect.Field leftField = BinaryExpression.class.getDeclaredField("left");
-                java.lang.reflect.Field rightField = BinaryExpression.class.getDeclaredField("right");
-                leftField.setAccessible(true);
-                rightField.setAccessible(true);
-                return containsAggregate((Expression) leftField.get(binary)) || containsAggregate((Expression) rightField.get(binary));
-            } catch (ReflectiveOperationException e) {
-                throw new RuntimeException("Failed to inspect expression tree", e);
-            }
-        }
-        if (expression instanceof UnaryExpression unary) {
-            try {
-                java.lang.reflect.Field operandField = UnaryExpression.class.getDeclaredField("operand");
-                operandField.setAccessible(true);
-                return containsAggregate((Expression) operandField.get(unary));
-            } catch (ReflectiveOperationException e) {
-                throw new RuntimeException("Failed to inspect unary expression tree", e);
-            }
-        }
-        return false;
-    }
+     }
+     /**
+      * Replays WAL records to bring data files to a transaction-consistent state.
+      * REDO is applied for committed transactions, then UNDO for incomplete transactions.
+      */
+     public void recover() throws Exception {
+         List<WalManager.WalRecord> records = transactionManager.getWalRecordsForRecovery();
+         if (records.isEmpty()) {
+             return;
+         }
+
+         long checkpointLsn = resolveReplayFloor(records, transactionManager.latestCheckpointLsn());
+         int replayWindowRecords = 0;
+
+         java.util.Set<Long> committed = transactionManager.recoverCommittedTxIds();
+
+         for (WalManager.WalRecord record : records) {
+             if (record.lsn() < checkpointLsn) {
+                 continue;
+             }
+             replayWindowRecords++;
+             if (isDataRecord(record) && committed.contains(record.txId())) {
+                 applyWalImage(record, record.after());
+             }
+         }
+
+         for (int i = records.size() - 1; i >= 0; i--) {
+             WalManager.WalRecord record = records.get(i);
+             if (record.lsn() < checkpointLsn) {
+                 continue;
+             }
+             if (!isDataRecord(record)) {
+                 continue;
+             }
+             long txId = record.txId();
+             if (!committed.contains(txId)) {
+                 applyWalImage(record, record.before());
+             }
+         }
+         LOG.info("Recovery completed. WAL records replayed=" + replayWindowRecords + " from checkpointLSN=" + checkpointLsn);
+     }
+
+     private long resolveReplayFloor(List<WalManager.WalRecord> records, long persistedCheckpointLsn) {
+         if (persistedCheckpointLsn > 0) {
+             for (WalManager.WalRecord record : records) {
+                 if (record.type() == WalManager.RecordType.CHECKPOINT && record.lsn() == persistedCheckpointLsn) {
+                     return persistedCheckpointLsn;
+                 }
+             }
+         }
+
+         for (int i = records.size() - 1; i >= 0; i--) {
+             WalManager.WalRecord record = records.get(i);
+             if (record.type() == WalManager.RecordType.CHECKPOINT) {
+                 return record.lsn();
+             }
+         }
+         return 0L;
+     }
+
+     private boolean isDataRecord(WalManager.WalRecord record) {
+         return record.type() == WalManager.RecordType.INSERT
+                 || record.type() == WalManager.RecordType.UPDATE
+                 || record.type() == WalManager.RecordType.DELETE;
+     }
+
+     private void applyWalImage(WalManager.WalRecord record, byte[] image) throws Exception {
+         int pageId = record.pageId();
+         int offset = record.offset();
+         if (pageId < 0 || image == null || image.length == 0) {
+             return;
+         }
+         Page page = storageEngine.getBufferPool().fetchPage(pageId);
+         System.arraycopy(image, 0, page.getData(), offset, image.length);
+         page.setPageLsn(record.lsn());
+         page.markDirty();
+         storageEngine.getBufferPool().flushPage(pageId);
+     }
+
+     /**
+      * Gets the TransactionManager for external access (e.g., recovery).
+      *
+      * @return The TransactionManager instance
+      */
+     public TransactionManager getTransactionManager() {
+         return transactionManager;
+     }
+
+     /**
+      * Closes all resources.
+      *
+      * @throws Exception If any error occurs during resource cleanup
+      */
+     public void close() throws Exception {
+         transactionManager.close();
+     }
 }

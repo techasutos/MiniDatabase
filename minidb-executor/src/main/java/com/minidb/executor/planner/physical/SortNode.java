@@ -55,7 +55,12 @@ public class SortNode implements PlanNode {
     private Object evalForRow(Row row, Expression expr) {
         Map<String, Object> map = new HashMap<>();
         for (int i = 0; i < columnNames.size(); i++) {
-            map.put(columnNames.get(i), row.getValues().get(i));
+            String columnName = columnNames.get(i);
+            map.put(columnName, row.getValues().get(i));
+            int dot = columnName.lastIndexOf('.');
+            if (dot >= 0 && dot < columnName.length() - 1) {
+                map.putIfAbsent(columnName.substring(dot + 1), row.getValues().get(i));
+            }
         }
         return expr.evaluate(new com.minidb.sql.ast.RowContext(map));
     }

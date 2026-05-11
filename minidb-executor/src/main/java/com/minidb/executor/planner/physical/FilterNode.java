@@ -6,6 +6,7 @@ import com.minidb.storage.row.Row;
 import com.minidb.catalog.model.Table;
 
 import java.util.*;
+import java.util.function.Consumer;
 /**
  * FilterNode applies a boolean condition to each row produced by its child node.
  * Only rows that satisfy the condition are passed through to the output.
@@ -40,27 +41,21 @@ public class FilterNode implements PlanNode {
      */
     @Override
     public List<Row> execute() throws Exception {
-
-        List<Row> input = child.execute();
         List<Row> output = new ArrayList<>();
 
-        for (Row r : input) {
+        forEachRow(output::add);
+        return output;
+    }
 
-            Map<String, Object> map = new HashMap<>();
-
-            for (int i = 0; i < table.getColumns().size(); i++) {
-                map.put(table.getColumns().get(i).getName(), r.getValues().get(i));
-            }
-
-            RowContext ctx = new RowContext(map);
-
+    @Override
+    public void forEachRow(Consumer<Row> consumer) throws Exception {
+        child.forEachRow(r -> {
+            RowContext ctx = new RowContext(RowContextBuilder.build(table, r));
             Object result = condition.evaluate(ctx);
 
             if (result instanceof Boolean && (Boolean) result) {
-                output.add(r);
+                consumer.accept(r);
             }
-        }
-
-        return output;
+        });
     }
 }

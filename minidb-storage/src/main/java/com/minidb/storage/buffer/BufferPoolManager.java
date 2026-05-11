@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 /**
  * LRU Buffer Pool Manager.
@@ -21,8 +22,15 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class BufferPoolManager {
 
+    @FunctionalInterface
+    public interface WalFlusher {
+        void flushUpTo(long lsn) throws IOException;
+    }
+
     private final DiskManager diskManager;
     private final int poolSize;
+    private final LongSupplier flushedLsnSupplier;
+    private final WalFlusher walFlusher;
 
     /** LRU map: access-ordered → eldest = least recently used */
     private final LinkedHashMap<Integer, Page> lruCache;
@@ -36,8 +44,21 @@ public class BufferPoolManager {
     private final AtomicLong evictions   = new AtomicLong();
 
     public BufferPoolManager(DiskManager diskManager, int poolSize) {
+        this(diskManager, poolSize, null, null);
+    }
+
+    public BufferPoolManager(DiskManager diskManager, int poolSize, LongSupplier flushedLsnSupplier) {
+        this(diskManager, poolSize, flushedLsnSupplier, null);
+    }
+
+    public BufferPoolManager(DiskManager diskManager,
+                             int poolSize,
+                             LongSupplier flushedLsnSupplier,
+                             WalFlusher walFlusher) {
         this.diskManager = diskManager;
         this.poolSize    = poolSize;
+        this.flushedLsnSupplier = flushedLsnSupplier;
+        this.walFlusher = walFlusher;
         // access-order = true → get() moves entry to tail (most-recently-used position)
         this.lruCache = new LinkedHashMap<>(poolSize, 0.75f, true) {
             @Override
@@ -94,6 +115,7 @@ public class BufferPoolManager {
     public synchronized void flushPage(int pageId) throws IOException {
         Page page = lruCache.get(pageId);
         if (page != null && page.isDirty()) {
+            enforceWalFlushGate(page);
             diskManager.writePage(pageId, page.getData());
             page.clearDirty();
         }
@@ -144,5 +166,24 @@ public class BufferPoolManager {
             }
         }
         throw new IOException("Buffer pool full and all pages are pinned — cannot evict");
+    }
+
+    private void enforceWalFlushGate(Page page) throws IOException {
+        if (flushedLsnSupplier == null) {
+            return;
+        }
+        long pageLsn = page.getPageLsn();
+        if (pageLsn <= 0) {
+            return;
+        }
+        long flushedLsn = flushedLsnSupplier.getAsLong();
+        if (pageLsn > flushedLsn && walFlusher != null) {
+            walFlusher.flushUpTo(pageLsn);
+            flushedLsn = flushedLsnSupplier.getAsLong();
+        }
+        if (pageLsn > flushedLsn) {
+            throw new IOException("WAL flush gate violation for page " + page.getPageId()
+                    + ": pageLSN=" + pageLsn + " flushedLSN=" + flushedLsn);
+        }
     }
 }

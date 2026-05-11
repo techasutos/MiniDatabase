@@ -44,6 +44,18 @@ Thumbs.db
 .env
 
 # =========================
+# Node / dashboard UI
+# =========================
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+minidb-dashboard/node_modules/
+minidb-dashboard/dist/
+minidb-dashboard/.vite/
+minidb-dashboard/*.tsbuildinfo
+package-lock.json
+# =========================
 # Spring / custom framework cache
 # =========================
 *.pid

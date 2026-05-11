@@ -2,13 +2,19 @@ package com.minidb.storage.engine;
 
 import com.minidb.catalog.model.Table;
 import com.minidb.storage.buffer.BufferPoolManager;
+import com.minidb.storage.index.IndexManager;
 import com.minidb.storage.page.Page;
 import com.minidb.storage.page.TablePage;
 import com.minidb.storage.row.Row;
+import com.minidb.tx.TransactionManager;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 
 /**
  * Manages storage of a single table, handling page allocation,
@@ -22,8 +28,12 @@ public class TableStorage {
 
     private final BufferPoolManager bufferPool;
     private final Table table;
+    private final TransactionManager transactionManager;
     // Monotonic page-id allocator for this table instance.
     private int nextPageIdCounter;
+
+    // Cached tail page for append-heavy workloads.
+    private int tailPageId;
 
     // Free page list for reuse (in-memory for now)
     private final java.util.Set<Integer> freePages = new java.util.HashSet<>();
@@ -35,8 +45,13 @@ public class TableStorage {
     private final ThreadLocal<java.util.Map<Integer, byte[]>> txLog = ThreadLocal.withInitial(java.util.HashMap::new);
 
     public TableStorage(BufferPoolManager bufferPool, Table table) {
+        this(bufferPool, table, null);
+    }
+
+    public TableStorage(BufferPoolManager bufferPool, Table table, TransactionManager transactionManager) {
         this.bufferPool = bufferPool;
         this.table = table;
+        this.transactionManager = transactionManager;
         // Initialize root header once for new tables.
         try {
             Page rootPage = bufferPool.fetchPage(table.getRootPageId());
@@ -47,11 +62,11 @@ public class TableStorage {
             if (rowCount == 0 && nextPageId == 0) {
                 buffer.putInt(0, 0); // rowCount
                 buffer.putInt(4, -1); // nextPageId
-                rootPage.markDirty();
-                bufferPool.flushPage(table.getRootPageId());
+                markDirtyAndMaybeFlush(rootPage, 0L);
             }
             // Initialize allocator once from current known max.
             this.nextPageIdCounter = findMaxPageId();
+            this.tailPageId = findTailPageId();
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialize root page header", e);
         }
@@ -84,8 +99,7 @@ public class TableStorage {
             byte[] original = entry.getValue();
             Page page = bufferPool.fetchPage(pageId);
             System.arraycopy(original, 0, page.getData(), 0, original.length);
-            page.markDirty();
-            bufferPool.flushPage(pageId);
+            markDirtyAndMaybeFlush(page, 0L);
         }
         inTransaction.set(false);
         txLog.get().clear();
@@ -101,50 +115,83 @@ public class TableStorage {
     }
 
     public synchronized void insert(Row row) throws Exception {
-        int pageId = table.getRootPageId();
-        int lastPageId = pageId;
+        int pageId = resolveTailPageId();
         Page page = bufferPool.fetchPage(pageId);
         TablePage tablePage = new TablePage(page, table);
-        // Traverse to last page with space or allocate new
-        while (!tablePage.hasSpace()) {
-            int nextPageId = tablePage.getNextPageId();
-            if (nextPageId == -1) {
-                // Allocate new page
-                int newPageId = allocateNewPage();
-                TablePage newPage = new TablePage(bufferPool.fetchPage(newPageId), table);
-                logPageIfNeeded(newPageId);
-                tablePage.setNextPageId(newPageId);
-                // Persist link immediately to keep chain consistent across evictions.
-                bufferPool.flushPage(page.getPageId());
-                tablePage = newPage;
-                lastPageId = newPageId;
-                break;
-            } else {
-                lastPageId = nextPageId;
-                page = bufferPool.fetchPage(nextPageId);
-                tablePage = new TablePage(page, table);
-            }
+
+        if (!tablePage.hasSpace()) {
+            byte[] tailBefore = copyPageBytes(page);
+            int newPageId = allocateNewPage();
+            TablePage newPage = new TablePage(bufferPool.fetchPage(newPageId), table);
+            logPageIfNeeded(newPageId);
+            tablePage.setNextPageId(newPageId);
+            long tailLsn = logWalChange(page.getPageId(), 0, tailBefore, copyPageBytes(page));
+            markDirtyAndMaybeFlush(page, tailLsn);
+            tablePage = newPage;
+            pageId = newPageId;
+            tailPageId = newPageId;
         }
-        logPageIfNeeded(lastPageId);
+
+        logPageIfNeeded(pageId);
+        Page targetPage = bufferPool.fetchPage(pageId);
+        byte[] before = copyPageBytes(targetPage);
         tablePage.insertRow(row);
-        bufferPool.flushPage(lastPageId);
+        long lsn = logWalChange(pageId, 0, before, copyPageBytes(targetPage));
+        markDirtyAndMaybeFlush(targetPage, lsn);
     }
 
     public java.util.List<Row> scan() throws Exception {
         List<Row> allRows = new ArrayList<>();
+        scan(allRows::add);
+        return allRows;
+    }
+
+    /**
+     * Streams rows together with their encoded row pointers.
+     */
+    public void scanWithPointers(BiConsumer<Long, Row> consumer) throws Exception {
+        Set<Integer> visited = new HashSet<>();
         int pageId = table.getRootPageId();
-        int maxPages = 1000; // safeguard to prevent infinite loop
-        int traversed = 0;
         while (pageId != -1) {
-            if (++traversed > maxPages) {
-                throw new IllegalStateException("Page chain too long or cyclic. Traversed: " + traversed);
+            if (!visited.add(pageId)) {
+                throw new IllegalStateException("Page chain contains a cycle at page " + pageId);
             }
             Page page = bufferPool.fetchPage(pageId);
             TablePage tablePage = new TablePage(page, table);
-            allRows.addAll(tablePage.getRows());
+            int rowCount = tablePage.getRowCount();
+            for (int slot = 0; slot < rowCount; slot++) {
+                Row row = tablePage.getRow(slot);
+                consumer.accept(IndexManager.encodePointer(pageId, slot), row);
+            }
             pageId = tablePage.getNextPageId();
         }
-        return allRows;
+    }
+
+    public Row readRow(long rowPointer) throws Exception {
+        int pageId = IndexManager.decodePageId(rowPointer);
+        int slot = IndexManager.decodeSlot(rowPointer);
+        Page page = bufferPool.fetchPage(pageId);
+        TablePage tablePage = new TablePage(page, table);
+        return tablePage.getRow(slot);
+    }
+
+    /**
+     * Streams rows through a consumer without materializing the whole table in memory.
+     */
+    public void scan(Consumer<Row> consumer) throws Exception {
+        Set<Integer> visited = new HashSet<>();
+        int pageId = table.getRootPageId();
+        while (pageId != -1) {
+            if (!visited.add(pageId)) {
+                throw new IllegalStateException("Page chain contains a cycle at page " + pageId);
+            }
+            Page page = bufferPool.fetchPage(pageId);
+            TablePage tablePage = new TablePage(page, table);
+            for (Row row : tablePage.getRows()) {
+                consumer.accept(row);
+            }
+            pageId = tablePage.getNextPageId();
+        }
     }
 
     /**
@@ -159,6 +206,7 @@ public class TableStorage {
         while (pageId != -1) {
             logPageIfNeeded(pageId);
             Page page = bufferPool.fetchPage(pageId);
+            byte[] before = copyPageBytes(page);
             TablePage tablePage = new TablePage(page, table);
             java.util.List<Row> rows = tablePage.getRows();
             boolean dirty = false;
@@ -171,8 +219,8 @@ public class TableStorage {
             }
             if (dirty) {
                 tablePage.overwriteRows(rows);
-                page.markDirty();
-                bufferPool.flushPage(pageId);
+                long lsn = logWalChange(pageId, 0, before, copyPageBytes(page));
+                markDirtyAndMaybeFlush(page, lsn);
             }
             pageId = tablePage.getNextPageId();
         }
@@ -190,18 +238,19 @@ public class TableStorage {
         while (pageId != -1) {
             logPageIfNeeded(pageId);
             Page page = bufferPool.fetchPage(pageId);
+            byte[] pageBefore = copyPageBytes(page);
             TablePage tablePage = new TablePage(page, table);
             java.util.List<Row> rows = tablePage.getRows();
-            int before = rows.size();
+            int beforeCount = rows.size();
             rows.removeIf(predicate);
-            int after = rows.size();
-            if (after < before) {
+            int afterCount = rows.size();
+            if (afterCount < beforeCount) {
                 tablePage.overwriteRows(rows);
-                page.markDirty();
-                bufferPool.flushPage(pageId);
-                deleted += (before - after);
+                long lsn = logWalChange(pageId, 0, pageBefore, copyPageBytes(page));
+                markDirtyAndMaybeFlush(page, lsn);
+                deleted += (beforeCount - afterCount);
                 // If page is now empty (not root), add to free list
-                if (after == 0 && pageId != table.getRootPageId()) {
+                if (afterCount == 0 && pageId != table.getRootPageId()) {
                     freePages.add(pageId);
                     // Unlink from chain
                     unlinkPage(pageId);
@@ -209,6 +258,7 @@ public class TableStorage {
             }
             pageId = tablePage.getNextPageId();
         }
+        tailPageId = findTailPageId();
         return deleted;
     }
 
@@ -221,9 +271,10 @@ public class TableStorage {
             int nextId = prevTablePage.getNextPageId();
             if (nextId == pageId) {
                 // Bypass the page
+                byte[] before = copyPageBytes(prevPage);
                 prevTablePage.setNextPageId(new TablePage(bufferPool.fetchPage(pageId), table).getNextPageId());
-                prevPage.markDirty();
-                bufferPool.flushPage(prevId);
+                long lsn = logWalChange(prevId, 0, before, copyPageBytes(prevPage));
+                markDirtyAndMaybeFlush(prevPage, lsn);
                 break;
             }
             prevId = nextId;
@@ -237,23 +288,47 @@ public class TableStorage {
             int reusedPageId = freePages.iterator().next();
             freePages.remove(reusedPageId);
             Page page = bufferPool.fetchPage(reusedPageId);
+            byte[] before = copyPageBytes(page);
             ByteBuffer buffer = ByteBuffer.wrap(page.getData());
             buffer.putInt(0, 0); // rowCount
             buffer.putInt(4, -1); // nextPageId
-            page.markDirty();
-            bufferPool.flushPage(reusedPageId);
+            long lsn = logWalChange(reusedPageId, 0, before, copyPageBytes(page));
+            markDirtyAndMaybeFlush(page, lsn);
             return reusedPageId;
         }
 
         // Monotonic allocation avoids accidental page-id reuse.
         int newPageId = ++nextPageIdCounter;
         Page page = bufferPool.fetchPage(newPageId);
+        byte[] before = copyPageBytes(page);
         ByteBuffer buffer = ByteBuffer.wrap(page.getData());
         buffer.putInt(0, 0); // rowCount
         buffer.putInt(4, -1); // nextPageId
-        page.markDirty();
-        bufferPool.flushPage(newPageId);
+        long lsn = logWalChange(newPageId, 0, before, copyPageBytes(page));
+        markDirtyAndMaybeFlush(page, lsn);
         return newPageId;
+    }
+
+    private byte[] copyPageBytes(Page page) {
+        return java.util.Arrays.copyOf(page.getData(), page.getData().length);
+    }
+
+    private long logWalChange(int pageId, int offset, byte[] before, byte[] after) throws Exception {
+        if (transactionManager == null || !transactionManager.hasActiveTx()) {
+            return 0L;
+        }
+        // Use UPDATE-style records with before/after images so both REDO and UNDO are possible.
+        return transactionManager.logUpdate(pageId, offset, before, after);
+    }
+
+    private void markDirtyAndMaybeFlush(Page page, long lsn) throws Exception {
+        if (lsn > 0) {
+            page.setPageLsn(lsn);
+        }
+        page.markDirty();
+        if (transactionManager == null || !transactionManager.hasActiveTx()) {
+            bufferPool.flushPage(page.getPageId());
+        }
     }
 
     /**
@@ -276,15 +351,47 @@ public class TableStorage {
         // Clear root page
         Page rootPage = bufferPool.fetchPage(table.getRootPageId());
         ByteBuffer buffer = ByteBuffer.wrap(rootPage.getData());
+        byte[] beforeRoot = copyPageBytes(rootPage);
         buffer.putInt(0, 0);
         buffer.putInt(4, -1);
-        rootPage.markDirty();
-        bufferPool.flushPage(table.getRootPageId());
+        long rootLsn = logWalChange(table.getRootPageId(), 0, beforeRoot, copyPageBytes(rootPage));
+        markDirtyAndMaybeFlush(rootPage, rootLsn);
         // Re-insert all rows
         for (Row row : allRows) {
             insert(row);
         }
+        tailPageId = findTailPageId();
         return freed;
+    }
+
+    private int resolveTailPageId() throws Exception {
+        if (tailPageId < 0) {
+            tailPageId = findTailPageId();
+            return tailPageId;
+        }
+
+        Page tailPage = bufferPool.fetchPage(tailPageId);
+        TablePage tablePage = new TablePage(tailPage, table);
+        if (tablePage.getNextPageId() != -1) {
+            tailPageId = findTailPageId();
+        }
+        return tailPageId;
+    }
+
+    private int findTailPageId() throws Exception {
+        int pageId = table.getRootPageId();
+        int lastSeen = pageId;
+        Set<Integer> visited = new HashSet<>();
+        while (pageId != -1) {
+            if (!visited.add(pageId)) {
+                throw new IllegalStateException("Page chain contains a cycle at page " + pageId);
+            }
+            lastSeen = pageId;
+            Page page = bufferPool.fetchPage(pageId);
+            TablePage tablePage = new TablePage(page, table);
+            pageId = tablePage.getNextPageId();
+        }
+        return lastSeen;
     }
 
     private int findMaxPageId() throws Exception {

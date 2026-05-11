@@ -48,6 +48,11 @@ This folder contains implementation-level documentation for the current MiniData
   - Row/page/table physical format explanation
   - Storage-format limitations and roadmap
 
+- `docs/Server-Productization-Roadmap.md`
+  - Milestone plan to reach full-fledged server readiness
+  - JDBC/native protocol compatibility goals
+  - Dashboard-readiness and operational acceptance criteria
+
 ## Recommended reading order
 
 1. `docs/Architecture-and-Execution-Guide.md`
@@ -58,6 +63,7 @@ This folder contains implementation-level documentation for the current MiniData
 6. `docs/Operations-Runbook.md`
 7. `docs/Security-and-Hardening-Guide.md`
 8. `docs/Recovery-Design-and-WAL-Roadmap.md`
+9. `docs/Server-Productization-Roadmap.md`
 
 ## Scope notes
 

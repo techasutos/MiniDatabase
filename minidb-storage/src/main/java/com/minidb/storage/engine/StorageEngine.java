@@ -2,6 +2,9 @@ package com.minidb.storage.engine;
 
 import com.minidb.storage.buffer.BufferPoolManager;
 import com.minidb.storage.disk.FileDiskManager;
+import com.minidb.storage.index.IndexManager;
+
+import java.util.function.LongSupplier;
 
 /**
  * StorageEngine is the main entry point for the storage layer.
@@ -21,13 +24,28 @@ import com.minidb.storage.disk.FileDiskManager;
 public class StorageEngine {
 
     private final BufferPoolManager bufferPool;
+    private final IndexManager indexManager = new IndexManager();
 
     public StorageEngine(String dbFilePath) throws Exception {
+        this(dbFilePath, null, null);
+    }
+
+    public StorageEngine(String dbFilePath, LongSupplier flushedLsnSupplier) throws Exception {
+        this(dbFilePath, flushedLsnSupplier, null);
+    }
+
+    public StorageEngine(String dbFilePath,
+                         LongSupplier flushedLsnSupplier,
+                         BufferPoolManager.WalFlusher walFlusher) throws Exception {
         FileDiskManager diskManager = new FileDiskManager(dbFilePath);
-        this.bufferPool = new BufferPoolManager(diskManager, 10);
+        this.bufferPool = new BufferPoolManager(diskManager, 10, flushedLsnSupplier, walFlusher);
     }
 
     public BufferPoolManager getBufferPool() {
         return bufferPool;
+    }
+
+    public IndexManager getIndexManager() {
+        return indexManager;
     }
 }

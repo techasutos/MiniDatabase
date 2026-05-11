@@ -79,6 +79,18 @@ public class TablePage {
         return rows;
     }
 
+    public Row getRow(int slotIndex) {
+        int rowCount = getRowCount();
+        if (slotIndex < 0 || slotIndex >= rowCount) {
+            return null;
+        }
+
+        int offset = HEADER_SIZE + slotIndex * table.getRowSize();
+        byte[] rowBytes = new byte[table.getRowSize()];
+        System.arraycopy(page.getData(), offset, rowBytes, 0, rowBytes.length);
+        return RowSerializer.deserialize(rowBytes, table);
+    }
+
     /**
      * Overwrites all rows in this page with the provided list.
      * Updates the row count and marks the page as dirty.
