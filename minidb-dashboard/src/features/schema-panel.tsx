@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, Database, FilePlus2, Layers3, MoreHorizontal, PencilLine, PlusCircle, RefreshCcw, Table2, Trash2, WandSparkles } from "lucide-react";
 import { getColumns, getDatabases, getSchemas, getTables, runQuery } from "../lib/api";
@@ -39,6 +40,8 @@ export function SchemaPanel({ onOpenSql }: SchemaPanelProps) {
   const [selectedDatabase, setSelectedDatabase] = useState("");
   const [selectedSchema, setSelectedSchema] = useState("");
   const [selectedTable, setSelectedTable] = useState("");
+  const [expandedDatabases, setExpandedDatabases] = useState<Set<string>>(new Set());
+  const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set());
   const [objectDialogOpen, setObjectDialogOpen] = useState(false);
   const [actionConfig, setActionConfig] = useState<ObjectActionConfig>({
     kind: "database",
@@ -52,9 +55,45 @@ export function SchemaPanel({ onOpenSql }: SchemaPanelProps) {
 
   const databaseItems = databasesQuery.data?.items ?? [];
 
+  const schemaKey = (database: string, schema: string) => `${database}::${schema}`;
+
+  const expandDatabase = (database: string) => {
+    setExpandedDatabases((prev) => new Set(prev).add(database));
+  };
+
+  const collapseDatabase = (database: string) => {
+    setExpandedDatabases((prev) => {
+      const next = new Set(prev);
+      next.delete(database);
+      return next;
+    });
+  };
+
+  const expandSchema = (database: string, schema: string) => {
+    setExpandedSchemas((prev) => new Set(prev).add(schemaKey(database, schema)));
+  };
+
+  const collapseSchema = (database: string, schema: string) => {
+    setExpandedSchemas((prev) => {
+      const next = new Set(prev);
+      next.delete(schemaKey(database, schema));
+      return next;
+    });
+  };
+
   useEffect(() => {
-    if (!selectedDatabase && databaseItems.length > 0) {
-      setSelectedDatabase(databaseItems[0].name);
+    if (databaseItems.length === 0) {
+      setSelectedDatabase("");
+      setSelectedSchema("");
+      setSelectedTable("");
+      setExpandedDatabases(new Set());
+      setExpandedSchemas(new Set());
+      return;
+    }
+    if (!selectedDatabase || !databaseItems.some((db) => db.name === selectedDatabase)) {
+      const firstDatabase = databaseItems[0].name;
+      setSelectedDatabase(firstDatabase);
+      expandDatabase(firstDatabase);
     }
   }, [databaseItems, selectedDatabase]);
 
@@ -68,8 +107,15 @@ export function SchemaPanel({ onOpenSql }: SchemaPanelProps) {
   const schemaItems = schemasQuery.data?.items ?? [];
 
   useEffect(() => {
-    if (!selectedSchema && schemaItems.length > 0) {
-      setSelectedSchema(schemaItems[0].name);
+    if (schemaItems.length === 0) {
+      setSelectedSchema("");
+      setSelectedTable("");
+      return;
+    }
+    if (!selectedSchema || !schemaItems.some((schema) => schema.name === selectedSchema)) {
+      const firstSchema = schemaItems[0].name;
+      setSelectedSchema(firstSchema);
+      expandSchema(selectedDatabase, firstSchema);
     }
   }, [schemaItems, selectedSchema]);
 
@@ -91,6 +137,23 @@ export function SchemaPanel({ onOpenSql }: SchemaPanelProps) {
       setSelectedTable(tableItems[0].name);
     }
   }, [tableItems, selectedTable]);
+
+  const selectDatabase = (database: string) => {
+    setSelectedDatabase(database);
+    setSelectedSchema("");
+    setSelectedTable("");
+    expandDatabase(database);
+  };
+
+  const selectSchema = (schema: string) => {
+    setSelectedSchema(schema);
+    setSelectedTable("");
+    expandSchema(selectedDatabase, schema);
+  };
+
+  const selectTable = (table: string) => {
+    setSelectedTable(table);
+  };
 
   const tablePreviewSql = selectedDatabase && selectedSchema && selectedTable
     ? `SELECT * FROM ${selectedDatabase}.${selectedSchema}.${selectedTable} LIMIT 25`
@@ -235,9 +298,18 @@ export function SchemaPanel({ onOpenSql }: SchemaPanelProps) {
   const tree = useMemo(() => {
     return databaseItems.map((db) => ({
       name: db.name,
-      schemas: db.name === selectedDatabase ? schemaItems : []
+      selected: db.name === selectedDatabase,
+      expanded: expandedDatabases.has(db.name),
+      schemas: db.name === selectedDatabase && expandedDatabases.has(db.name)
+        ? schemaItems.map((schema) => ({
+            name: schema.name,
+            selected: schema.name === selectedSchema,
+            expanded: expandedSchemas.has(schemaKey(db.name, schema.name)),
+            tables: schema.name === selectedSchema && expandedSchemas.has(schemaKey(db.name, schema.name)) ? tableItems : []
+          }))
+        : []
     }));
-  }, [databaseItems, schemaItems, selectedDatabase]);
+  }, [databaseItems, schemaItems, tableItems, selectedDatabase, selectedSchema, expandedDatabases, expandedSchemas]);
 
   const emitTemplateFromMenu = (sql: string, label: string) => {
     emitSqlDraft(sql);
@@ -249,13 +321,199 @@ export function SchemaPanel({ onOpenSql }: SchemaPanelProps) {
     });
   };
 
+  const schemaSidebarSlot = typeof document !== "undefined"
+    ? document.getElementById("schema-catalog-sidebar-slot")
+    : null;
+
+  const catalogCard = (
+    <Card className={schemaSidebarSlot ? "" : "lg:sticky lg:top-4 lg:self-start"}>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2"><Database className="h-5 w-5" /> Catalog</CardTitle>
+        <CardDescription>{databaseItems.length} database(s) discovered</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-2">
+        {tree.map((db) => (
+          <div key={db.name} className="grid gap-1">
+            <div
+              role="button"
+              tabIndex={0}
+              className={[
+                "flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left transition hover:bg-accent",
+                db.selected ? "border-primary bg-primary/5" : ""
+              ].join(" ")}
+              onClick={() => selectDatabase(db.name)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  selectDatabase(db.name);
+                }
+              }}
+              onContextMenu={(e) => openContextMenu(e, "database", db.name, "public", "new_table")}
+              aria-haspopup="menu"
+              aria-label={`Open ${db.name} database`}
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded p-0.5 text-muted-foreground hover:bg-background"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (db.expanded) {
+                      collapseDatabase(db.name);
+                    } else {
+                      expandDatabase(db.name);
+                    }
+                  }}
+                  aria-label={`${db.expanded ? "Collapse" : "Expand"} database ${db.name}`}
+                  title={db.expanded ? "Collapse database" : "Expand database"}
+                >
+                  <ChevronRight className={[
+                    "h-4 w-4 text-muted-foreground transition-transform",
+                    db.expanded ? "rotate-90" : ""
+                  ].join(" ")} />
+                </button>
+                <Database className="h-4 w-4 text-muted-foreground" />
+                <span className="truncate font-medium">{db.name}</span>
+              </span>
+              <span className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className="rounded p-1 text-muted-foreground hover:bg-background"
+                  onClick={(e) => openDropdownMenu(e, "database", db.name, "public", "new_table")}
+                  onContextMenu={(e) => openContextMenu(e, "database", db.name, "public", "new_table")}
+                  aria-label={`Open actions for database ${db.name}`}
+                  aria-haspopup="menu"
+                  title="Open management menu"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </button>
+              </span>
+            </div>
+
+            {db.expanded && db.selected ? (
+              <div className="ml-4 grid gap-1 border-l pl-3">
+                {db.schemas.length > 0 ? db.schemas.map((schema) => (
+                  <div key={schema.name} className="grid gap-1">
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      className={[
+                        "flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left transition hover:bg-accent",
+                        schema.selected ? "border-primary bg-primary/5" : "border-transparent"
+                      ].join(" ")}
+                      onClick={() => selectSchema(schema.name)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          selectSchema(schema.name);
+                        }
+                      }}
+                      onContextMenu={(e) => openContextMenu(e, "schema", db.name, schema.name, "new_table")}
+                      aria-haspopup="menu"
+                      aria-label={`Open ${db.name}.${schema.name} schema`}
+                    >
+                      <span className="flex min-w-0 items-center gap-2">
+                        <button
+                          type="button"
+                          className="rounded p-0.5 text-muted-foreground hover:bg-background"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (schema.expanded) {
+                              collapseSchema(db.name, schema.name);
+                            } else {
+                              expandSchema(db.name, schema.name);
+                            }
+                          }}
+                          aria-label={`${schema.expanded ? "Collapse" : "Expand"} schema ${db.name}.${schema.name}`}
+                          title={schema.expanded ? "Collapse schema" : "Expand schema"}
+                        >
+                          <ChevronRight className={[
+                            "h-4 w-4 text-muted-foreground transition-transform",
+                            schema.expanded ? "rotate-90" : ""
+                          ].join(" ")} />
+                        </button>
+                        <Layers3 className="h-4 w-4 text-muted-foreground" />
+                        <span className="truncate">{schema.name}</span>
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          className="rounded p-1 text-muted-foreground hover:bg-background"
+                          onClick={(e) => openDropdownMenu(e, "schema", db.name, schema.name, "new_table")}
+                          onContextMenu={(e) => openContextMenu(e, "schema", db.name, schema.name, "new_table")}
+                          aria-label={`Open actions for schema ${db.name}.${schema.name}`}
+                          aria-haspopup="menu"
+                          title="Open management menu"
+                        >
+                          <MoreHorizontal className="h-4 w-4" />
+                        </button>
+                      </span>
+                    </div>
+
+                    {schema.selected && schema.expanded ? (
+                      <div className="ml-4 grid gap-1 border-l pl-3">
+                        {schema.tables.map((table) => (
+                          <div
+                            key={table.name}
+                            role="button"
+                            tabIndex={0}
+                            className={[
+                              "flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left transition hover:bg-accent",
+                              selectedTable === table.name ? "border-primary bg-primary/5" : "border-transparent"
+                            ].join(" ")}
+                            onClick={() => {
+                              selectTable(table.name);
+                              emitSqlDraft(`SELECT * FROM ${db.name}.${schema.name}.${table.name} LIMIT 100;`);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                selectTable(table.name);
+                                emitSqlDraft(`SELECT * FROM ${db.name}.${schema.name}.${table.name} LIMIT 100;`);
+                              }
+                            }}
+                            onContextMenu={(e) => openContextMenu(e, "table", db.name, schema.name, table.name)}
+                            aria-haspopup="menu"
+                            aria-label={`Open ${db.name}.${schema.name}.${table.name} table`}
+                          >
+                            <span className="flex min-w-0 items-center gap-2">
+                              <Table2 className="h-4 w-4 text-muted-foreground" />
+                              <span className="truncate font-medium">{table.name}</span>
+                            </span>
+                            <button
+                              type="button"
+                              className="rounded p-1 text-muted-foreground hover:bg-background"
+                              onClick={(e) => openDropdownMenu(e, "table", db.name, schema.name, table.name)}
+                              onContextMenu={(e) => openContextMenu(e, "table", db.name, schema.name, table.name)}
+                              aria-label={`Open actions for table ${db.name}.${schema.name}.${table.name}`}
+                              aria-haspopup="menu"
+                              title="Open management menu"
+                            >
+                              <MoreHorizontal className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ))}
+                        {schema.tables.length === 0 ? <p className="px-3 py-2 text-sm text-muted-foreground">No tables found for selected schema.</p> : null}
+                      </div>
+                    ) : null}
+                  </div>
+                )) : <p className="px-3 py-2 text-sm text-muted-foreground">No schemas found for selected database.</p>}
+              </div>
+            ) : null}
+          </div>
+        ))}
+        {databaseItems.length === 0 ? <p className="text-sm text-muted-foreground">No databases found.</p> : null}
+      </CardContent>
+    </Card>
+  );
+
   return (
     <div className="grid gap-4">
       <Card>
         <CardHeader className="flex-row items-center justify-between gap-4 space-y-0">
           <div>
             <CardTitle>Schema explorer</CardTitle>
-            <CardDescription>Live metadata from SHOW DATABASES / SHOW SCHEMAS / SHOW TABLES protocol commands.</CardDescription>
+            <CardDescription>Use the left-side drill-down tree to browse databases, schemas, and tables. Right-click any node or use the action button beside it.</CardDescription>
           </div>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => setObjectDialogOpen(true)}>
@@ -266,202 +524,89 @@ export function SchemaPanel({ onOpenSql }: SchemaPanelProps) {
             </Button>
           </div>
         </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-2">
-          <label className="grid gap-2 text-sm">
-            Database
-            <select
-              className="h-10 rounded-md border border-input bg-background px-3"
-              value={selectedDatabase}
-              onChange={(e) => {
-                setSelectedDatabase(e.target.value);
-                setSelectedSchema("");
-              }}
-            >
-              {databaseItems.map((db) => (
-                <option key={db.name} value={db.name}>
-                  {db.name}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="grid gap-2 text-sm">
-            Schema
-            <select
-              className="h-10 rounded-md border border-input bg-background px-3"
-              value={selectedSchema}
-              onChange={(e) => setSelectedSchema(e.target.value)}
-            >
-              {schemaItems.map((schema) => (
-                <option key={schema.name} value={schema.name}>
-                  {schema.name}
-                </option>
-              ))}
-            </select>
-          </label>
+        <CardContent className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+          <span>Selected path:</span>
+          <Badge className="border-muted-foreground/30">{selectedDatabase || "No database"}</Badge>
+          <Badge className="border-muted-foreground/30">{selectedSchema || "No schema"}</Badge>
+          <Badge className="border-muted-foreground/30">{selectedTable || "No table"}</Badge>
         </CardContent>
       </Card>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2"><Database className="h-5 w-5" /> Databases</CardTitle>
-            <CardDescription>{databaseItems.length} database(s) discovered</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-2">
-            {tree.map((db) => (
-              <div key={db.name} className="rounded-md border p-3" onContextMenu={(e) => openContextMenu(e, "database", db.name, "public", "new_table")}>
-                <div className="flex items-center justify-between gap-2 font-medium">
-                  <div className="flex items-center gap-2"><Database className="h-4 w-4" /> {db.name}</div>
-                  <button
-                    type="button"
-                    className="rounded p-1 text-muted-foreground hover:bg-accent"
-                    onClick={(e) => openDropdownMenu(e, "database", db.name, "public", "new_table")}
-                    onContextMenu={(e) => openContextMenu(e, "database", db.name, "public", "new_table")}
-                    aria-label={`Open actions for database ${db.name}`}
-                    aria-haspopup="menu"
-                    title="Open management menu"
-                  >
-                    <MoreHorizontal className="h-4 w-4" />
-                  </button>
-                </div>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  {(db.schemas.length > 0 ? db.schemas : [{ name: "public" }]).map((schema) => (
-                    <span key={schema.name} className="inline-flex items-center gap-1">
-                      <Badge className="border-muted-foreground/30" onContextMenu={(e) => openContextMenu(e, "schema", db.name, schema.name, "new_table")}>
-                        <Layers3 className="mr-1 h-3 w-3" /> {schema.name}
-                      </Badge>
-                      <button
-                        type="button"
-                        className="rounded p-1 text-muted-foreground hover:bg-accent"
-                        onClick={(e) => openDropdownMenu(e, "schema", db.name, schema.name, "new_table")}
-                        onContextMenu={(e) => openContextMenu(e, "schema", db.name, schema.name, "new_table")}
-                        aria-label={`Open actions for schema ${db.name}.${schema.name}`}
-                        aria-haspopup="menu"
-                        title="Open management menu"
-                      >
-                        <MoreHorizontal className="h-3.5 w-3.5" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
+      <div className={schemaSidebarSlot ? "grid gap-4" : "grid gap-4 lg:grid-cols-[320px,1fr]"}>
+        {schemaSidebarSlot ? null : catalogCard}
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2"><ChevronRight className="h-5 w-5" /> Tables</CardTitle>
-            <CardDescription>
-              {selectedDatabase && selectedSchema ? `${selectedDatabase}.${selectedSchema}` : "Select a database and schema"}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-2">
-            {tableItems.map((table) => (
-              <div
-                key={table.name}
-                role="button"
-                onClick={() => {
-                  setSelectedTable(table.name);
-                  const qn = `${selectedDatabase}.${selectedSchema}.${table.name}`;
-                  emitSqlDraft(`SELECT * FROM ${qn} LIMIT 100;`);
-                }}
-                onContextMenu={(e) => openContextMenu(e, "table", selectedDatabase, selectedSchema, table.name)}
-                className={[
-                  "flex cursor-pointer items-center justify-between gap-2 rounded-md border p-3",
-                  selectedTable === table.name ? "border-primary bg-primary/5" : ""
-                ].join(" ")}
-              >
-                <div className="flex items-center gap-2">
-                  <Table2 className="h-4 w-4 text-muted-foreground" />
-                  <span className="font-medium">{table.name}</span>
-                </div>
-                <button
-                  type="button"
-                  className="rounded p-1 text-muted-foreground hover:bg-accent"
-                  onClick={(e) => openDropdownMenu(e, "table", selectedDatabase, selectedSchema, table.name)}
-                  onContextMenu={(e) => openContextMenu(e, "table", selectedDatabase, selectedSchema, table.name)}
-                  aria-label={`Open actions for table ${selectedDatabase}.${selectedSchema}.${table.name}`}
-                  aria-haspopup="menu"
-                  title="Open management menu"
-                >
-                  <MoreHorizontal className="h-4 w-4" />
-                </button>
+        <div className="grid gap-4">
+          <Card>
+            <CardHeader className="flex-row items-center justify-between gap-4 space-y-0">
+              <div>
+                <CardTitle>Table data preview</CardTitle>
+                <CardDescription>
+                  {tablePreviewSql || "Select a table from the left drill-down menu to preview data"}
+                </CardDescription>
               </div>
-            ))}
-            {tableItems.length === 0 ? <p className="text-sm text-muted-foreground">No tables found for selected schema.</p> : null}
-          </CardContent>
-        </Card>
+              <Button variant="outline" onClick={() => previewQuery.refetch()} disabled={!tablePreviewSql}>
+                <RefreshCcw className="mr-2 h-4 w-4" /> Refresh data
+              </Button>
+            </CardHeader>
+            <CardContent>
+              {previewRows.length > 0 ? (
+                <div className="overflow-x-auto rounded-md border">
+                  <Table>
+                    <THead>
+                      <TR>
+                        {Array.from({ length: previewColumns }).map((_, i) => (
+                          <TH key={i}>col_{i + 1}</TH>
+                        ))}
+                      </TR>
+                    </THead>
+                    <TBody>
+                      {previewRows.map((row, rowIndex) => (
+                        <TR key={rowIndex}>
+                          {row.map((value, cellIndex) => (
+                            <TD key={cellIndex}>{value}</TD>
+                          ))}
+                        </TR>
+                      ))}
+                    </TBody>
+                  </Table>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  {previewQuery.isLoading ? "Loading table preview..." : "No rows returned for current preview."}
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Generate SQL from selected table</CardTitle>
+              <CardDescription>
+                Click a table in the left sidebar, then generate DDL/DML templates. Draft opens in SQL editor with multiline support.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-2 md:grid-cols-3">
+              <Button variant="secondary" disabled={!selectedTable} onClick={() => emitSqlDraft(dmlTemplate("select"))}>SELECT template</Button>
+              <Button variant="secondary" disabled={!selectedTable} onClick={() => emitSqlDraft(dmlTemplate("insert"))}>INSERT template</Button>
+              <Button variant="secondary" disabled={!selectedTable} onClick={() => emitSqlDraft(dmlTemplate("update"))}>
+                <PencilLine className="mr-2 h-4 w-4" /> UPDATE template
+              </Button>
+              <Button variant="secondary" disabled={!selectedTable} onClick={() => emitSqlDraft(dmlTemplate("delete"))}>
+                <Trash2 className="mr-2 h-4 w-4" /> DELETE template
+              </Button>
+              <Button variant="outline" disabled={!selectedTable} onClick={() => emitSqlDraft(ddlTemplate("alter"))}>
+                <WandSparkles className="mr-2 h-4 w-4" /> ALTER TABLE template
+              </Button>
+              <Button variant="outline" disabled={!selectedTable} onClick={() => emitSqlDraft(ddlTemplate("create"))}>
+                <FilePlus2 className="mr-2 h-4 w-4" /> CREATE TABLE template
+              </Button>
+              <Button variant="outline" disabled={!selectedTable} onClick={() => emitSqlDraft(ddlTemplate("drop"))}>DROP TABLE template</Button>
+            </CardContent>
+          </Card>
+        </div>
       </div>
 
-      <Card>
-        <CardHeader className="flex-row items-center justify-between gap-4 space-y-0">
-          <div>
-            <CardTitle>Table data preview</CardTitle>
-            <CardDescription>
-              {tablePreviewSql || "Select database/schema with at least one table to preview data"}
-            </CardDescription>
-          </div>
-          <Button variant="outline" onClick={() => previewQuery.refetch()} disabled={!tablePreviewSql}>
-            <RefreshCcw className="mr-2 h-4 w-4" /> Refresh data
-          </Button>
-        </CardHeader>
-        <CardContent>
-          {previewRows.length > 0 ? (
-            <div className="overflow-x-auto rounded-md border">
-              <Table>
-                <THead>
-                  <TR>
-                    {Array.from({ length: previewColumns }).map((_, i) => (
-                      <TH key={i}>col_{i + 1}</TH>
-                    ))}
-                  </TR>
-                </THead>
-                <TBody>
-                  {previewRows.map((row, rowIndex) => (
-                    <TR key={rowIndex}>
-                      {row.map((value, cellIndex) => (
-                        <TD key={cellIndex}>{value}</TD>
-                      ))}
-                    </TR>
-                  ))}
-                </TBody>
-              </Table>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              {previewQuery.isLoading ? "Loading table preview..." : "No rows returned for current preview."}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Generate SQL from selected table</CardTitle>
-          <CardDescription>
-            Click a table, then generate DDL/DML templates. Draft opens in SQL editor with multiline support.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-2 md:grid-cols-3">
-          <Button variant="secondary" disabled={!selectedTable} onClick={() => emitSqlDraft(dmlTemplate("select"))}>SELECT template</Button>
-          <Button variant="secondary" disabled={!selectedTable} onClick={() => emitSqlDraft(dmlTemplate("insert"))}>INSERT template</Button>
-          <Button variant="secondary" disabled={!selectedTable} onClick={() => emitSqlDraft(dmlTemplate("update"))}>
-            <PencilLine className="mr-2 h-4 w-4" /> UPDATE template
-          </Button>
-          <Button variant="secondary" disabled={!selectedTable} onClick={() => emitSqlDraft(dmlTemplate("delete"))}>
-            <Trash2 className="mr-2 h-4 w-4" /> DELETE template
-          </Button>
-          <Button variant="outline" disabled={!selectedTable} onClick={() => emitSqlDraft(ddlTemplate("alter"))}>
-            <WandSparkles className="mr-2 h-4 w-4" /> ALTER TABLE template
-          </Button>
-          <Button variant="outline" disabled={!selectedTable} onClick={() => emitSqlDraft(ddlTemplate("create"))}>
-            <FilePlus2 className="mr-2 h-4 w-4" /> CREATE TABLE template
-          </Button>
-          <Button variant="outline" disabled={!selectedTable} onClick={() => emitSqlDraft(ddlTemplate("drop"))}>DROP TABLE template</Button>
-        </CardContent>
-      </Card>
+      {schemaSidebarSlot ? createPortal(catalogCard, schemaSidebarSlot) : null}
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card>

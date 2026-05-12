@@ -63,6 +63,12 @@ export default function App() {
               </button>
             );
           })}
+
+          {view === "schema" ? (
+            <div className="mt-3 border-t pt-3">
+              <div id="schema-catalog-sidebar-slot" />
+            </div>
+          ) : null}
         </aside>
 
         <section>
